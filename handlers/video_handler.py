@@ -161,14 +161,14 @@ class VideoHandler:
         """Инициализация Pyrogram клиента с обработкой ошибок соединения"""
         if self.app is None:
             try:
+                # Удаляем неподдерживаемые параметры
                 self.app = Client(
                     "video_downloader",
                     api_id=self.api_id,
                     api_hash=self.api_hash,
                     bot_token=self.bot_token,
-                    in_memory=True,
-                    connect_timeout=20.0,  # Увеличиваем таймаут подключения
-                    max_concurrent_transmissions=10  # Ограничиваем параллельные передачи
+                    in_memory=True
+                    # Удаляем connect_timeout и max_concurrent_transmissions
                 )
                 
                 # Регистрируем клиент в менеджере соединений
@@ -182,6 +182,12 @@ class VideoHandler:
                 
             except Exception as e:
                 logger.error(f"Критическая ошибка при инициализации Pyrogram клиента: {e}")
+                if self.app:
+                    try:
+                        await self.app.stop()
+                    except:
+                        pass
+                    self.app = None
                 raise
 
     async def delete_previous_message(self, state: FSMContext):
