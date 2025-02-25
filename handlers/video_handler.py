@@ -897,6 +897,7 @@ class VideoHandler:
                         )
                     else:
                         await self.app.send_video(
+                            chat_id=original_message.chat.id,  # Добавляем этот параметр
                             video=types.BufferedInputFile(
                                 video_data, 
                                 filename=filename
