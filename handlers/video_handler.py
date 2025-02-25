@@ -896,18 +896,20 @@ class VideoHandler:
                             caption=f"{header}{text}"
                         )
                     else:
+                        # Используем тот же путь к файлу для второго случая
                         await self.app.send_video(
-                            chat_id=original_message.chat.id,  # Добавляем этот параметр
-                            video=types.BufferedInputFile(
-                                video_data, 
-                                filename=filename
-                            ),
+                            chat_id=original_message.chat.id,
+                            video=video_path,
                             caption=f"{header}(текст будет отправлен отдельно)"
                         )
+                        # Отправляем текст отдельно
                         for i in range(0, len(text), 4000):
                             chunk = text[i:i + 4000]
                             await asyncio.sleep(2)
-                            await original_message.reply(chunk)
+                            await self.app.send_message(
+                                chat_id=original_message.chat.id,
+                                text=chunk
+                            )
                     
                     # После успешной отправки очищаем все файлы
                     if file_id:
