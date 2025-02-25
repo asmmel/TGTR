@@ -1,3 +1,5 @@
+#Главный файл запуска
+
 import logging
 import asyncio
 import platform
