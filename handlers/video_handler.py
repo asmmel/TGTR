@@ -22,6 +22,7 @@ from services.tts_service import TTSService
 from services.audio_handler import AudioHandler
 from states.states import VideoProcessing
 from services.cobalt import CobaltDownloader
+from services.connection_manager import ConnectionManager
 from pyrogram import Client
 import os
 from os import path
@@ -38,6 +39,7 @@ class VideoHandler:
         self.rednote = RedNoteDownloader()
         self.transcriber = VideoTranscriber()
         self.tts_service = TTSService()
+        self.connection_manager = ConnectionManager("telegram_client")
         self.db = Database()
         self.audio_handler = AudioHandler()
         self.downloads_dir = "downloads"  # Для скачанных видео
@@ -156,20 +158,30 @@ class VideoHandler:
             return False
 
     async def init_client(self):
-        """Инициализация Pyrogram клиента"""
+        """Инициализация Pyrogram клиента с обработкой ошибок соединения"""
         if self.app is None:
-            self.app = Client(
-                "video_downloader",
-                api_id=self.api_id,
-                api_hash=self.api_hash,
-                bot_token=self.bot_token,
-                in_memory=True
-            )
             try:
-                await self.app.start()
+                self.app = Client(
+                    "video_downloader",
+                    api_id=self.api_id,
+                    api_hash=self.api_hash,
+                    bot_token=self.bot_token,
+                    in_memory=True,
+                    connect_timeout=20.0,  # Увеличиваем таймаут подключения
+                    max_concurrent_transmissions=10  # Ограничиваем параллельные передачи
+                )
+                
+                # Регистрируем клиент в менеджере соединений
+                self.connection_manager.register_client("pyrogram", self.app)
+                
+                # Пытаемся подключиться с повторами при ошибках
+                await self.connection_manager.with_connection_retry(
+                    self.app.start
+                )
                 logger.info("Pyrogram клиент успешно инициализирован")
+                
             except Exception as e:
-                logger.error(f"Ошибка при инициализации Pyrogram клиента: {e}")
+                logger.error(f"Критическая ошибка при инициализации Pyrogram клиента: {e}")
                 raise
 
     async def delete_previous_message(self, state: FSMContext):
