@@ -89,28 +89,71 @@ class TelegramLocalServer:
 
     def is_port_in_use(self) -> bool:
         """Проверяет, занят ли порт"""
-        for conn in psutil.net_connections():
-            if hasattr(conn, 'laddr') and hasattr(conn.laddr, 'port') and conn.laddr.port == self.config.local_port:
-                return True
-        return False
-
+        try:
+            for conn in psutil.net_connections():
+                if hasattr(conn, 'laddr') and hasattr(conn.laddr, 'port') and conn.laddr.port == self.config.local_port:
+                    return True
+            return False
+        except (psutil.AccessDenied, psutil.Error):
+            # Если нет доступа к информации о соединениях
+            self.logger.warning("Нет доступа к информации о сетевых соединениях")
+            return False
+    
     def kill_existing_process(self):
         """Завершает процесс, если он уже запущен на указанном порту"""
-        for proc in psutil.process_iter(['pid', 'name', 'connections']):
+        try:
+            # Сначала получаем список всех соединений
+            connections = psutil.net_connections()
+            # Находим процессы, использующие наш порт
+            pids = set()
+            for conn in connections:
+                if hasattr(conn, 'laddr') and hasattr(conn.laddr, 'port') and conn.laddr.port == self.config.local_port:
+                    if hasattr(conn, 'pid') and conn.pid is not None:
+                        pids.add(conn.pid)
+    
+            # Завершаем найденные процессы
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    self.logger.info(f"Отправлен SIGTERM процессу {pid} на порту {self.config.local_port}")
+                    time.sleep(1)
+                    
+                    # Проверяем, завершился ли процесс
+                    if psutil.pid_exists(pid):
+                        os.kill(pid, signal.SIGKILL)
+                        self.logger.info(f"Отправлен SIGKILL процессу {pid}")
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    # Процесс уже завершился
+                    pass
+        except (psutil.AccessDenied, psutil.Error) as e:
+            self.logger.warning(f"Ошибка при получении информации о процессах: {e}")
+            
+            # Альтернативный способ через lsof
             try:
-                for conn in proc.connections():
-                    if hasattr(conn, 'laddr') and hasattr(conn.laddr, 'port') and conn.laddr.port == self.config.local_port:
-                        # В Linux используем os.kill вместо proc.kill()
-                        os.kill(proc.pid, signal.SIGTERM)
-                        self.logger.info(f"Отправлен SIGTERM процессу {proc.pid} на порту {self.config.local_port}")
-                        time.sleep(1)
-                        
-                        # Проверяем, завершился ли процесс
-                        if psutil.pid_exists(proc.pid):
-                            os.kill(proc.pid, signal.SIGKILL)
-                            self.logger.info(f"Отправлен SIGKILL процессу {proc.pid}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
+                self.logger.info("Попытка использовать lsof для поиска процесса")
+                result = subprocess.run(
+                    ["lsof", "-i", f":{self.config.local_port}"], 
+                    capture_output=True, 
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    if len(lines) > 1:  # Skip header
+                        for line in lines[1:]:
+                            parts = line.split()
+                            if len(parts) > 1:
+                                try:
+                                    pid = int(parts[1])
+                                    os.kill(pid, signal.SIGTERM)
+                                    self.logger.info(f"Отправлен SIGTERM процессу {pid}")
+                                    time.sleep(1)
+                                    if psutil.pid_exists(pid):
+                                        os.kill(pid, signal.SIGKILL)
+                                except (ValueError, ProcessLookupError):
+                                    pass
+            except Exception as e2:
+                self.logger.warning(f"Не удалось использовать lsof: {e2}")
 
     def start(self) -> bool:
         """Запускает локальный сервер"""
