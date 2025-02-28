@@ -9,11 +9,19 @@ import aiofiles
 from typing import Optional, List
 import yt_dlp
 from moviepy.editor import VideoFileClip
+from pyrogram import Client
+import os
+from os import path
+import math
+
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramRetryAfter
 from config.config import BOT_TOKEN
+
+
+
 from services.kuaishou import KuaishouDownloader
 from services.transcriber import VideoTranscriber
 from services.rednote import RedNoteDownloader
@@ -23,10 +31,15 @@ from services.audio_handler import AudioHandler
 from states.states import VideoProcessing
 from services.cobalt import CobaltDownloader
 from services.connection_manager import ConnectionManager
+from services.video_streaming import VideoStreamingService
+from services.chunk_uploader import ChunkUploader
+
 from pyrogram import Client
 import os
 from os import path
 import math
+
+
 from config.config import setup_logging
 from config.config import ELEVENLABS_VOICES, API_ID, API_HASH
 # Настройка логирования
@@ -40,6 +53,7 @@ class VideoHandler:
         self.transcriber = VideoTranscriber()
         self.tts_service = TTSService()
         self.connection_manager = ConnectionManager("telegram_client")
+        self.chunk_uploader = ChunkUploader()
         self.db = Database()
         self.audio_handler = AudioHandler()
         self.downloads_dir = "downloads"  # Для скачанных видео
@@ -349,7 +363,8 @@ class VideoHandler:
                 try:
                     logger.info("Попытка загрузки через yt-dlp...")
                     ydl_opts = {
-                        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                        # Формат указывает максимальное разрешение 1080p
+                        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
                         'outtmpl': temp_path,
                         'quiet': True,
                         'no_warnings': True,
@@ -358,20 +373,21 @@ class VideoHandler:
                         'http_headers': headers,
                         'merge_output_format': 'mp4',
                         'prefer_ffmpeg': True,
+                        # Постпроцессоры для обеспечения формата MP4 
                         'postprocessors': [{
                             'key': 'FFmpegVideoConvertor',
                             'preferedformat': 'mp4',
                         }],
+                        # Сортировка форматов с приоритетом высоких, но не более 1080p
                         'format_sort': [
-                            'res:1080',
-                            'ext:mp4:m4a',
-                            'codec:h264:aac',
-                            'size',
-                            'br',
-                            'fps',
-                            'quality',
-                            'res',
-                            'asr',
+                            'height:1080',        # Приоритет 1080p
+                            'height:720',         # Затем 720p
+                            'ext:mp4:m4a',        # Предпочитаем MP4
+                            'codec:h264:aac',     # H.264 и AAC кодеки
+                            'size',               # Размер файла
+                            'br',                 # Битрейт
+                            'fps',                # Частота кадров
+                            'quality', 
                         ],
                         'retries': 3,
                         'fragment_retries': 3,
@@ -976,34 +992,54 @@ class VideoHandler:
 
 
     async def send_video(self, chat_id: int, video_path: str, caption: str = None):
-        """Отправка видео через локальный сервер"""
+        """Отправка видео через локальный сервер с потоковой передачей и таймаутами"""
         try:
             if not self.session:
                 await self.init_session()
 
-            # Формируем multipart данные
+            # Проверяем существование файла
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Файл не найден: {video_path}")
+
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            logger.info(f"Подготовка к отправке видео размером {file_size_mb:.2f} MB")
+
+            # Формируем multipart данные с потоковой передачей
             form = aiohttp.FormData()
             form.add_field(
                 'video',
-                open(video_path, 'rb'),
-                filename=os.path.basename(video_path)
+                open(video_path, 'rb'),  # Файл читается потоково
+                filename=os.path.basename(video_path),
+                content_type='video/mp4'
             )
+            form.add_field('chat_id', str(chat_id))
             if caption:
                 form.add_field('caption', caption)
-            form.add_field('chat_id', str(chat_id))
 
-            # Отправляем через локальный сервер
+            # Устанавливаем таймаут (10 минут на всю операцию)
+            timeout = aiohttp.ClientTimeout(total=600)
+
+            # Отправляем запрос с чанковой передачей
             async with self.session.post(
                 f"/bot{BOT_TOKEN}/sendVideo",
-                data=form
+                data=form,
+                chunked=True,  # Включаем чанковую передачу
+                timeout=timeout
             ) as response:
                 response.raise_for_status()
-                return await response.json()
+                result = await response.json()
+                logger.info(f"Видео успешно отправлено: {video_path}")
+                return result
 
+        except asyncio.TimeoutError:
+            logger.error(f"Превышен таймаут при отправке видео: {video_path}")
+            raise Exception("Превышен таймаут отправки видео (10 минут)")
+        except FileNotFoundError as e:
+            logger.error(f"Файл не найден: {e}")
+            raise
         except Exception as e:
             logger.error(f"Ошибка при отправке видео через локальный сервер: {e}")
             raise
-
 
     async def handle_tts_command(self, message: types.Message, state: FSMContext):
         """Обработка команды /tts"""
@@ -1116,7 +1152,7 @@ class VideoHandler:
             if user_id in self.active_users:
                 await callback_query.answer("⏳ Дождитесь окончания обработки")
                 return
-                        
+                            
             self.active_users.add(user_id)
             await callback_query.answer()
             
@@ -1143,35 +1179,44 @@ class VideoHandler:
                 logger.error(f"Файл не найден: {video_path}")
                 await message_with_buttons.edit_text("❌ Файл не найден")
                 return
-                    
+                        
             if action == 'download':
                 await message_with_buttons.edit_text("📤 Подготовка к отправке...")
+                
+                # Проверим размер файла
+                file_size = os.path.getsize(video_path)
+                file_size_mb = file_size / (1024 * 1024)
+                
                 try:
+                    # Имя файла для отправки
                     filename = self.generate_video_filename(service_type)
                     
-                    # Используем асинхронное чтение файла
-                    async with aiofiles.open(video_path, 'rb') as video_file:
-                        video_data = await video_file.read()
-                        
-                        # Используем self.bot вместо self.app
-                        await self.bot.send_video(
-                            chat_id=original_message.chat.id,
-                            video=types.BufferedInputFile(
-                                video_data,
-                                filename=filename
-                            ),
-                            caption=f"✅ Видео успешно загружено\n📁 Имя файла: {filename}"
-                        )
-                    await message_with_buttons.delete()
+                    # Обновляем сообщение статуса
+                    progress_message = await message_with_buttons.edit_text(
+                        f"📤 Начинаю отправку видео ({file_size_mb:.1f} MB)..."
+                    )
+                    
+                    # Отправляем видео через единый метод
+                    video_caption = f"✅ Видео успешно загружено\n📁 Имя файла: {filename}"
+                    await self.send_video(
+                        chat_id=original_message.chat.id,
+                        video_path=video_path,
+                        caption=video_caption
+                    )
+                    
+                    # Успешная отправка - удаляем сообщение с прогрессом
+                    await progress_message.edit_text("✅ Видео успешно отправлено!")
+                    await asyncio.sleep(1)  # Даем пользователю увидеть сообщение
+                    await progress_message.delete()
                     
                 except Exception as e:
                     logger.error(f"Ошибка при отправке видео: {e}")
-                    await message_with_buttons.edit_text("❌ Ошибка при отправке видео")
+                    await message_with_buttons.edit_text(f"❌ Ошибка при отправке видео: {str(e)[:100]}")
                     raise
-                        
+                    
             elif action == 'recognize':
                 wav_path = os.path.join(self.downloads_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}.wav")
-                
+            
                 await message_with_buttons.edit_text("🎵 Извлекаю аудио из видео...")
                 
                 # Не удаляем wav_path если он существует, он может понадобиться
@@ -1205,16 +1250,15 @@ class VideoHandler:
                         "🌍 Выберите язык видео:",
                         reply_markup=keyboard
                     )
-                        
+                            
         except Exception as e:
             error_msg = f"❌ Ошибка: {str(e)}"
             logger.error(error_msg)
             if message_with_buttons:
                 await message_with_buttons.edit_text(error_msg)
-                
+                    
         finally:
             # Очищаем файлы только если это была операция download
-            # Для recognize файлы нужны для дальнейшей обработки
             if action == 'download' and file_id:
                 await self.cleanup_files(file_id)
                 

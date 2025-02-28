@@ -6,6 +6,8 @@ from aiogram.fsm.context import FSMContext
 from handlers.video_handler import VideoHandler
 from states.states import VideoProcessing
 from services.File_Manager import FileManager
+from services.chunk_uploader import ChunkUploader
+
 from config.config import BOT_TOKEN, setup_logging
 import logging
 import os
@@ -175,6 +177,8 @@ class VideoBot:
         @self.dp.callback_query(lambda c: c.data and (c.data == 'audio_silence' or c.data == 'audio_recognize'))
         async def audio_action_handler(callback_query: types.CallbackQuery, state: FSMContext):
             await self.video_handler.handle_audio_action(callback_query, state)
+
+        
 
         # Добавляем обработчик ошибок
         @self.dp.errors()
