@@ -299,41 +299,32 @@ class KuaishouDownloader:
         try:
             download_headers = headers.copy()
             download_headers.update({
-                'Host': 'v2.kwaicdn.com',
+                'Host': url.split('/')[2],  # Используем домен из URL
                 'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
                 'Accept-Encoding': 'identity;q=1, *;q=0',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Connection': 'keep-alive',
                 'Range': 'bytes=0-',
-                'Sec-Fetch-Dest': 'video',
-                'Sec-Fetch-Mode': 'no-cors',
-                'Sec-Fetch-Site': 'cross-site',
             })
-
+    
             proxy = self._get_random_proxy()
             session = self._create_session(proxy)
             logging.info(f"Начинаем загрузку видео через прокси: {proxy}")
-
+    
             response = session.get(url, headers=download_headers, stream=True, timeout=60)
+            logging.info(f"Статус ответа: {response.status_code}")
             response.raise_for_status()
-
+    
             total_size = int(response.headers.get('content-length', 0))
             logging.info(f"Размер файла: {total_size // (1024*1024)} MB")
-
-            block_size = 1024 * 1024
-            downloaded = 0
-
+    
             with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(block_size):
+                for chunk in response.iter_content(1024 * 1024):
                     if chunk:
                         f.write(chunk)
-                        downloaded += len(chunk)
-                        progress = int((downloaded / total_size) * 100)
-                        logging.info(f"Прогресс: {progress}% [{downloaded} / {total_size}]")
-
             logging.info("Загрузка завершена!")
             return True
-
+    
         except Exception as e:
             logging.error(f"Ошибка при загрузке: {str(e)}")
+            if 'response' in locals():
+                logging.error(f"Ответ сервера: {response.text[:1000]}")
             return False
