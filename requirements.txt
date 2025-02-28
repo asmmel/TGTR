@@ -18,7 +18,6 @@ charset-normalizer==3.4.1
 colorama==0.4.6
 cryptography==44.0.0
 decorator==4.4.2
-elevenlabs==0.2.24
 exceptiongroup==1.2.2
 executing==2.1.0
 fake-useragent==2.0.3
