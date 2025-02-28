@@ -24,8 +24,10 @@ class KuaishouDownloader:
         self.max_attempts = 5
         self.current_video_url = None  # Переменная для хранения текущего URL видео
         
-        # Загружаем прокси из .env файла
-        self.proxy_pool = self._load_proxies_from_env()
+        # Загружаем настройки из .env
+        load_dotenv()
+        self.use_proxy = os.getenv('USE_PROXY', 'False').lower() == 'true'  # По умолчанию False
+        self.proxy_pool = self._load_proxies_from_env() if self.use_proxy else []
         
         # Остальные настройки остаются без изменений
         self.cookies_pool = [
@@ -56,7 +58,6 @@ class KuaishouDownloader:
     def _load_proxies_from_env(self) -> List[Dict[str, str]]:
         """Загрузка прокси из .env файла"""
         try:
-            load_dotenv()
             proxy_pool = []
             proxy_count = 1
             while True:
@@ -90,9 +91,9 @@ class KuaishouDownloader:
     def _generate_webday7_ph(self):
         return ''.join(random.choice('0123456789abcdef') for _ in range(32))
 
-    def _get_random_proxy(self) -> dict:
-        if not self.proxy_pool:
-            raise ValueError("Пул прокси пуст")
+    def _get_random_proxy(self) -> Optional[dict]:
+        if not self.use_proxy or not self.proxy_pool:
+            return None
         return random.choice(self.proxy_pool)
 
     def _create_session(self, proxy: Optional[dict] = None) -> requests.Session:
@@ -104,6 +105,8 @@ class KuaishouDownloader:
         if proxy:
             session.proxies.update(proxy)
             logging.info(f"Используется прокси: {proxy}")
+        else:
+            logging.info("Прокси не используется")
         return session
 
     async def _extract_video_id(self, url: str) -> str:
@@ -124,10 +127,9 @@ class KuaishouDownloader:
                 max_attempts = 3
                 for attempt in range(max_attempts):
                     try:
-                        proxy = self._get_random_proxy()
-                        logging.info(f"Используем прокси (попытка {attempt + 1}): {proxy}")
-                        session = requests.Session()
-                        session.proxies.update(proxy)
+                        proxy = self._get_random_proxy() if self.use_proxy else None
+                        logging.info(f"Используем прокси (попытка {attempt + 1}): {proxy if proxy else 'Нет'}")
+                        session = self._create_session(proxy)
                         response = session.get(url, headers=headers, allow_redirects=True, timeout=30)
                         logging.info(f"Финальный URL: {response.url}")
                         logging.info(f"История редиректов: {[r.url for r in response.history]}")
@@ -180,8 +182,8 @@ class KuaishouDownloader:
                 }
 
                 logging.info(f"Пробуем cookies set #{cookie_index + 1}")
-                proxy = self._get_random_proxy()
-                logging.info(f"Используем прокси: {proxy}")
+                proxy = self._get_random_proxy() if self.use_proxy else None
+                logging.info(f"Используем прокси: {proxy if proxy else 'Нет'}")
 
                 payload = {
                     "operationName": "visionVideoDetail",
@@ -299,32 +301,41 @@ class KuaishouDownloader:
         try:
             download_headers = headers.copy()
             download_headers.update({
-                'Host': url.split('/')[2],  # Используем домен из URL
+                'Host': 'v2.kwaicdn.com',
                 'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
                 'Accept-Encoding': 'identity;q=1, *;q=0',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Connection': 'keep-alive',
                 'Range': 'bytes=0-',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site',
             })
-    
-            proxy = self._get_random_proxy()
+
+            proxy = self._get_random_proxy() if self.use_proxy else None
             session = self._create_session(proxy)
-            logging.info(f"Начинаем загрузку видео через прокси: {proxy}")
-    
+            logging.info(f"Начинаем загрузку видео через прокси: {proxy if proxy else 'Нет'}")
+
             response = session.get(url, headers=download_headers, stream=True, timeout=60)
-            logging.info(f"Статус ответа: {response.status_code}")
             response.raise_for_status()
-    
+
             total_size = int(response.headers.get('content-length', 0))
             logging.info(f"Размер файла: {total_size // (1024*1024)} MB")
-    
+
+            block_size = 1024 * 1024
+            downloaded = 0
+
             with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(1024 * 1024):
+                for chunk in response.iter_content(block_size):
                     if chunk:
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        progress = int((downloaded / total_size) * 100)
+                        logging.info(f"Прогресс: {progress}% [{downloaded} / {total_size}]")
+
             logging.info("Загрузка завершена!")
             return True
-    
+
         except Exception as e:
             logging.error(f"Ошибка при загрузке: {str(e)}")
-            if 'response' in locals():
-                logging.error(f"Ответ сервера: {response.text[:1000]}")
             return False
