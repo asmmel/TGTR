@@ -98,13 +98,6 @@ class VideoHandler:
             self.connector = None
 
     async def set_bot(self, bot):
-        """Установка экземпляра бота и инициализация путей"""
-        self.bot = bot
-        # Получаем базовый путь к файлам бота
-        test_file = await self.bot.get_file("unknown_file_id")
-        self.bot_files_base_dir = os.path.dirname(os.path.dirname(test_file.file_path))
-
-    async def set_bot(self, bot):
         """Установка экземпляра бота"""
         self.bot = bot
 
@@ -661,19 +654,16 @@ class VideoHandler:
                 # Создаем директорию, если её нет
                 os.makedirs(os.path.dirname(video_path), exist_ok=True)
                 
-                # Проверяем существование файла и формируем правильный путь к нему
-                local_path = file.file_path
-                if os.path.exists(local_path):
-                    # Если файл существует локально, просто копируем его
-                    import shutil
-                    shutil.copy2(local_path, video_path)
-                else:
-                    # Если нет, скачиваем через API
+                # Всегда скачиваем файл через API, не пытаясь проверить локальный путь
+                try:
                     await self.bot.download_file(
                         file.file_path,
                         video_path,
                         timeout=60
                     )
+                except Exception as download_error:
+                    logger.error(f"Ошибка при скачивании файла: {download_error}")
+                    raise FileNotFoundError(f"Не удалось скачать файл: {download_error}")
                 
                 if not os.path.exists(video_path):
                     raise FileNotFoundError("Файл не был загружен")
