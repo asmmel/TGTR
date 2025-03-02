@@ -84,8 +84,8 @@ class TelegramLocalServer:
             f"--max-webhook-connections={self.config.max_webhook_connections}",
             "--verbosity=2",
             f"--dir={self.config.working_dir}",
-            "--log=/var/log/telegram-bot-api/telegram-bot-api.log",  # Linux путь для лога
-            "--max-media-size=4000000000"
+            "--log=/var/log/telegram-bot-api/telegram-bot-api.log"  # Linux путь для лога
+            
         ]
 
     def is_port_in_use(self) -> bool:
