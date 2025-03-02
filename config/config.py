@@ -16,7 +16,7 @@ DOWNLOADS_DIR = "downloads"  # Уже есть в вашем конфиге
 MODELS_DIR = "models"
 
 # Настройки файлов
-MAX_VIDEO_SIZE = 45 * 1024 * 1024  # 45MB
+MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200MB
 SUPPORTED_LANGUAGES = ['ru', 'en', 'zh']
 
 # Настройки базы данных
