@@ -97,6 +97,13 @@ class VideoHandler:
             await self.connector.close()
             self.connector = None
 
+    # async def set_bot(self, bot):
+    #     """Установка экземпляра бота и инициализация путей"""
+    #     self.bot = bot
+    #     # Получаем базовый путь к файлам бота
+    #     test_file = await self.bot.get_file("unknown_file_id")
+    #     self.bot_files_base_dir = os.path.dirname(os.path.dirname(test_file.file_path))
+
     async def set_bot(self, bot):
         """Установка экземпляра бота"""
         self.bot = bot
@@ -644,12 +651,7 @@ class VideoHandler:
             
             try:
                 # Получаем информацию о файле
-                if not message.video or not message.video.file_id:
-                    raise ValueError("Видео файл отсутствует или поврежден")
-                
                 file = await self.bot.get_file(message.video.file_id)
-                if not file or not file.file_path:
-                    raise ValueError("Не удалось получить информацию о файле")
                 
                 # Генерируем безопасное имя файла
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -659,18 +661,19 @@ class VideoHandler:
                 # Создаем директорию, если её нет
                 os.makedirs(os.path.dirname(video_path), exist_ok=True)
                 
-                # Всегда скачиваем файл через API, не пытаясь проверить локальный путь
-                try:
-                    logger.info(f"Скачивание файла {file.file_path} в {video_path}")
-                    
+                # Проверяем существование файла и формируем правильный путь к нему
+                local_path = file.file_path
+                if os.path.exists(local_path):
+                    # Если файл существует локально, просто копируем его
+                    import shutil
+                    shutil.copy2(local_path, video_path)
+                else:
+                    # Если нет, скачиваем через API
                     await self.bot.download_file(
                         file.file_path,
                         video_path,
                         timeout=60
                     )
-                except Exception as download_error:
-                    logger.error(f"Ошибка при скачивании файла: {download_error}")
-                    raise FileNotFoundError(f"Не удалось скачать файл: {download_error}")
                 
                 if not os.path.exists(video_path):
                     raise FileNotFoundError("Файл не был загружен")
@@ -679,8 +682,6 @@ class VideoHandler:
                 actual_size = os.path.getsize(video_path)
                 if actual_size == 0:
                     raise ValueError("Загруженный файл пуст")
-                
-                logger.info(f"Видео успешно загружено в {video_path}, размер: {actual_size/1024/1024:.2f} MB")
 
                 # Сохраняем путь к видео
                 await state.update_data(video_path=video_path)
@@ -705,10 +706,9 @@ class VideoHandler:
 
             except Exception as e:
                 logger.error(f"Ошибка при загрузке видео: {str(e)}")
-                if video_path and os.path.exists(video_path):
+                if os.path.exists(video_path):
                     try:
                         os.remove(video_path)
-                        logger.info(f"Удален неполный файл: {video_path}")
                     except Exception as del_error:
                         logger.error(f"Ошибка при удалении файла: {del_error}")
                 raise Exception(f"Не удалось загрузить видео файл: {str(e)}")
@@ -725,7 +725,6 @@ class VideoHandler:
             if video_path and os.path.exists(video_path):
                 try:
                     os.remove(video_path)
-                    logger.info(f"Удален файл после ошибки: {video_path}")
                 except Exception as clean_error:
                     logger.error(f"Ошибка при очистке файла {video_path}: {clean_error}")
         finally:
@@ -1216,58 +1215,42 @@ class VideoHandler:
                     raise
                     
             elif action == 'recognize':
-                # Безопасное создание пути к wav файлу
-                try:
-                    if video_path and os.path.exists(video_path):
-                        video_basename = os.path.basename(video_path)
-                        video_filename_without_ext = os.path.splitext(video_basename)[0]
-                        wav_path = os.path.join(self.downloads_dir, f"{video_filename_without_ext}.wav")
-                    else:
-                        # Если путь к видео отсутствует или файл не существует, создаем временный путь для wav
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        wav_path = os.path.join(self.downloads_dir, f"temp_audio_{timestamp}.wav")
-                        logger.warning(f"Создан временный путь для wav файла: {wav_path}")
+                wav_path = os.path.join(self.downloads_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}.wav")
+            
+                await message_with_buttons.edit_text("🎵 Извлекаю аудио из видео...")
                 
-                    await message_with_buttons.edit_text("🎵 Извлекаю аудио из видео...")
-                    
-                    # Убедимся, что директория существует
-                    os.makedirs(os.path.dirname(wav_path), exist_ok=True)
-                    
-                    # Не удаляем wav_path если он существует, он может понадобиться
-                    success = await self.transcriber.extract_audio(video_path, wav_path)
-                    
-                    if not success:
-                        logger.error(f"Не удалось извлечь аудио из {video_path} в {wav_path}")
-                        await message_with_buttons.edit_text("❌ Ошибка при извлечении аудио")
-                        return
-                    
-                    # Сохраняем путь к wav файлу
-                    await state.update_data(
-                        audio_path=wav_path,
-                        wav_path=wav_path
-                    )
-                                        
-                    if service_type == 'kuaishou':
-                        await self._process_chinese_transcription(original_message, state, message_with_buttons)
-                    else:
-                        keyboard = InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [
-                                    InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
-                                    InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
-                                    InlineKeyboardButton(text="🇨🇳 中文", callback_data="lang_zh")
-                                ]
+                # Не удаляем wav_path если он существует, он может понадобиться
+                success = await self.transcriber.extract_audio(video_path, wav_path)
+                
+                if not success:
+                    logger.error(f"Не удалось извлечь аудио из {video_path} в {wav_path}")
+                    await message_with_buttons.edit_text("❌ Ошибка при извлечении аудио")
+                    return
+                
+                # Сохраняем путь к wav файлу
+                await state.update_data(
+                    audio_path=wav_path,
+                    wav_path=wav_path
+                )
+                                    
+                if service_type == 'kuaishou':
+                    await self._process_chinese_transcription(original_message, state, message_with_buttons)
+                else:
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
+                                InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
+                                InlineKeyboardButton(text="🇨🇳 中文", callback_data="lang_zh")
                             ]
-                        )
-                        
-                        await message_with_buttons.edit_text(
-                            "🌍 Выберите язык видео:",
-                            reply_markup=keyboard
-                        )
-                except Exception as audio_error:
-                    logger.error(f"Ошибка при обработке аудио: {audio_error}")
-                    await message_with_buttons.edit_text(f"❌ Ошибка при обработке аудио: {str(audio_error)[:100]}")
-
+                        ]
+                    )
+                    
+                    await message_with_buttons.edit_text(
+                        "🌍 Выберите язык видео:",
+                        reply_markup=keyboard
+                    )
+                            
         except Exception as e:
             error_msg = f"❌ Ошибка: {str(e)}"
             logger.error(error_msg)
@@ -1323,12 +1306,6 @@ class VideoHandler:
             if action == 'silence':
                 await message_with_buttons.edit_text("✂️ Удаляю паузы...")
                 
-                # Проверяем существование файла
-                if not os.path.exists(audio_path):
-                    logger.error(f"Аудио файл не найден: {audio_path}")
-                    await message_with_buttons.edit_text("❌ Файл не найден")
-                    return
-                
                 processed_filename = f"processed_{os.path.basename(audio_path)}"
                 processed_path = os.path.join(self.downloads_dir, processed_filename)
                 
@@ -1354,48 +1331,27 @@ class VideoHandler:
                     
             elif action == 'recognize':
                 await message_with_buttons.edit_text("🎵 Подготовка к распознаванию...")
+                wav_path = f"{audio_path}.wav"
                 
-                # Проверяем существование файла
-                if not os.path.exists(audio_path):
-                    logger.error(f"Аудио файл не найден: {audio_path}")
-                    await message_with_buttons.edit_text("❌ Файл не найден")
-                    return
+                # Конвертация в WAV
+                await self.transcriber.extract_audio(audio_path, wav_path)
+                await state.update_data(wav_path=wav_path)
                 
-                try:
-                    # Создаем WAV файл с уникальным именем
-                    wav_path = f"{audio_path}.wav"
-                    
-                    # Убедимся, что директория существует
-                    os.makedirs(os.path.dirname(wav_path), exist_ok=True)
-                    
-                    # Конвертация в WAV
-                    success = await self.transcriber.extract_audio(audio_path, wav_path)
-                    
-                    if not success:
-                        logger.error(f"Не удалось извлечь аудио из {audio_path}")
-                        await message_with_buttons.edit_text("❌ Ошибка при конвертации аудио")
-                        return
-                    
-                    await state.update_data(wav_path=wav_path)
-                    
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
-                                InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
-                                InlineKeyboardButton(text="🇨🇳 中文", callback_data="lang_zh")
-                            ]
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
+                            InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
+                            InlineKeyboardButton(text="🇨🇳 中文", callback_data="lang_zh")
                         ]
-                    )
-                    
-                    await message_with_buttons.edit_text(
-                        "🌍 Выберите язык аудио:",
-                        reply_markup=keyboard
-                    )
-                except Exception as audio_error:
-                    logger.error(f"Ошибка при обработке аудио: {audio_error}")
-                    await message_with_buttons.edit_text(f"❌ Ошибка при обработке аудио: {str(audio_error)[:100]}")
-                    
+                    ]
+                )
+                
+                await message_with_buttons.edit_text(
+                    "🌍 Выберите язык аудио:",
+                    reply_markup=keyboard
+                )
+                
         except Exception as e:
             error_msg = f"❌ Ошибка при обработке аудио: {str(e)}"
             logger.error(error_msg)
@@ -1403,7 +1359,7 @@ class VideoHandler:
             
         finally:
             try:
-                if 'processed_path' in locals() and processed_path and os.path.exists(processed_path):
+                if 'processed_path' in locals() and os.path.exists(processed_path):
                     os.remove(processed_path)
                     logger.info(f"Удален временный файл: {processed_path}")
             except Exception as e:

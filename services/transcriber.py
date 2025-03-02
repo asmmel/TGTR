@@ -80,23 +80,9 @@ class VideoTranscriber:
         try:
             logger.info(f"Извлечение аудио из {video_path} в {output_path}")
             
-            # Более мягкая проверка входных параметров
-            if not video_path:
-                logger.error(f"Путь к видео файлу отсутствует")
-                return False
-                
-            if not output_path:
-                logger.error(f"Путь для выходного файла отсутствует")
-                return False
-            
             if not os.path.exists(video_path):
                 logger.error(f"Видео файл не найден: {video_path}")
                 return False
-                
-            # Создаем родительскую директорию, если ее нет
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
                 
             audio = AudioSegment.from_file(video_path)
             audio = audio.set_frame_rate(16000)
@@ -120,11 +106,6 @@ class VideoTranscriber:
             if not self.api_key:
                 logger.error("API ключ ElevenLabs не настроен")
                 return None
-            
-            # Упрощенная проверка входных данных
-            if not wav_path:
-                logger.error(f"Путь к аудио файлу отсутствует")
-                return None
                 
             if not os.path.exists(wav_path):
                 logger.error(f"Файл не найден: {wav_path}")
@@ -133,12 +114,6 @@ class VideoTranscriber:
             file_size = os.path.getsize(wav_path)
             logger.info(f"Начинаем транскрибацию файла {wav_path} размером {file_size/1024/1024:.2f} MB через ElevenLabs")
             
-            # Проверка размера файла для API
-            max_file_size = 25 * 1024 * 1024  # 25 MB
-            if file_size > max_file_size:
-                logger.warning(f"Файл превышает максимальный размер для API ElevenLabs: {file_size/1024/1024:.2f} MB > 25 MB")
-                logger.info("Попытка транскрибации большого файла...")
-                
             # Базовый URL для API ElevenLabs
             base_url = "https://api.elevenlabs.io/v1"
             
@@ -210,15 +185,6 @@ class VideoTranscriber:
 
     async def transcribe(self, wav_path: str, lang: str) -> Optional[str]:
         """Транскрибация аудио файла на заданном языке"""
-        # Упрощенная проверка входных данных
-        if not wav_path:
-            logger.error(f"Путь к аудио файлу отсутствует")
-            return None
-            
-        if not os.path.exists(wav_path):
-            logger.error(f"Аудио файл не найден по пути: {wav_path}")
-            return None
-        
         # Сначала пробуем ElevenLabs, если включено
         if self.use_elevenlabs:
             try:
