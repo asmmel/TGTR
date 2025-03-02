@@ -626,7 +626,6 @@ class VideoHandler:
         return os.path.join(self.downloads_dir, safe_name)
 
     async def process_video(self, message: types.Message, state: FSMContext):
-        """Обработка загруженного видео"""
         user_id = message.from_user.id
         
         if user_id in self.active_users:
@@ -650,39 +649,47 @@ class VideoHandler:
             )
             
             try:
-                # Получаем информацию о файле
+                # Получаем информацию о файле из API
                 file = await self.bot.get_file(message.video.file_id)
+                logger.info(f"File object: {file}")
+                logger.info(f"File path from API: {getattr(file, 'file_path', None)}")
                 
-                # Генерируем безопасное имя файла
+                # Генерируем новое имя файла
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"video_{timestamp}.mp4"
                 video_path = os.path.join(self.downloads_dir, filename)
                 
-                # Создаем директорию, если её нет
-                os.makedirs(os.path.dirname(video_path), exist_ok=True)
+                # Пытаемся определить, где находится файл на сервере
+                # Если локальный API-сервер использует directory mapping
+                server_file_path = None
+                if hasattr(file, 'file_path') and file.file_path:
+                    # Возможный путь к файлу внутри local API сервера
+                    server_file_path = os.path.join(self.bot_api_dir, file.file_path)
+                    logger.info(f"Полный путь к файлу на сервере: {server_file_path}")
+                    
+                    if os.path.exists(server_file_path):
+                        # Копируем файл в нашу директорию
+                        import shutil
+                        shutil.copy2(server_file_path, video_path)
+                        logger.info(f"Файл скопирован из: {server_file_path} в {video_path}")
+                    else:
+                        logger.warning(f"Файл не найден по пути: {server_file_path}")
                 
-                # Проверяем существование файла и формируем правильный путь к нему
-                local_path = file.file_path
-                if os.path.exists(local_path):
-                    # Если файл существует локально, просто копируем его
-                    import shutil
-                    shutil.copy2(local_path, video_path)
-                else:
-                    # Если нет, скачиваем через API
-                    await self.bot.download_file(
-                        file.file_path,
-                        video_path,
-                        timeout=60
-                    )
-                
+                # Если не удалось найти файл на сервере, скачиваем через API
                 if not os.path.exists(video_path):
-                    raise FileNotFoundError("Файл не был загружен")
-
+                    logger.info("Скачиваем файл через download_file")
+                    os.makedirs(os.path.dirname(video_path), exist_ok=True)
+                    await self.bot.download_file(file.file_path, video_path)
+                
+                # Финальная проверка файла
+                if not os.path.exists(video_path):
+                    raise FileNotFoundError("Файл не был загружен или скопирован")
+                
                 # Проверяем размер загруженного файла
                 actual_size = os.path.getsize(video_path)
                 if actual_size == 0:
                     raise ValueError("Загруженный файл пуст")
-
+                    
                 # Сохраняем путь к видео
                 await state.update_data(video_path=video_path)
                 
@@ -705,12 +712,9 @@ class VideoHandler:
                 logger.info(f"Видео успешно обработано и сохранено: {video_path}")
 
             except Exception as e:
-                logger.error(f"Ошибка при загрузке видео: {str(e)}")
-                if os.path.exists(video_path):
-                    try:
-                        os.remove(video_path)
-                    except Exception as del_error:
-                        logger.error(f"Ошибка при удалении файла: {del_error}")
+                logger.error(f"Ошибка при обработке видео: {str(e)}")
+                if video_path and os.path.exists(video_path):
+                    os.remove(video_path)
                 raise Exception(f"Не удалось загрузить видео файл: {str(e)}")
 
         except Exception as e:
