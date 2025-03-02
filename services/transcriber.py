@@ -80,13 +80,13 @@ class VideoTranscriber:
         try:
             logger.info(f"Извлечение аудио из {video_path} в {output_path}")
             
-            # Проверка входных параметров
-            if not video_path or not isinstance(video_path, str):
-                logger.error(f"Некорректный путь к видео файлу: {video_path}")
+            # Более мягкая проверка входных параметров
+            if not video_path:
+                logger.error(f"Путь к видео файлу отсутствует")
                 return False
                 
-            if not output_path or not isinstance(output_path, str):
-                logger.error(f"Некорректный путь для выходного файла: {output_path}")
+            if not output_path:
+                logger.error(f"Путь для выходного файла отсутствует")
                 return False
             
             if not os.path.exists(video_path):
@@ -121,9 +121,9 @@ class VideoTranscriber:
                 logger.error("API ключ ElevenLabs не настроен")
                 return None
             
-            # Проверка входных данных
-            if not wav_path or not isinstance(wav_path, str):
-                logger.error(f"Некорректный путь к аудио файлу: {wav_path}")
+            # Упрощенная проверка входных данных
+            if not wav_path:
+                logger.error(f"Путь к аудио файлу отсутствует")
                 return None
                 
             if not os.path.exists(wav_path):
@@ -131,10 +131,6 @@ class VideoTranscriber:
                 return None
                 
             file_size = os.path.getsize(wav_path)
-            if file_size == 0:
-                logger.error(f"Аудио файл пуст: {wav_path}")
-                return None
-                
             logger.info(f"Начинаем транскрибацию файла {wav_path} размером {file_size/1024/1024:.2f} MB через ElevenLabs")
             
             # Проверка размера файла для API
@@ -214,9 +210,9 @@ class VideoTranscriber:
 
     async def transcribe(self, wav_path: str, lang: str) -> Optional[str]:
         """Транскрибация аудио файла на заданном языке"""
-        # Проверка входных данных
-        if not wav_path or not isinstance(wav_path, str):
-            logger.error(f"Некорректный путь к аудио файлу: {wav_path}")
+        # Упрощенная проверка входных данных
+        if not wav_path:
+            logger.error(f"Путь к аудио файлу отсутствует")
             return None
             
         if not os.path.exists(wav_path):
@@ -241,16 +237,6 @@ class VideoTranscriber:
             return None
 
         try:
-            # Дополнительная проверка файла перед открытием
-            try:
-                file_size = os.path.getsize(wav_path)
-                if file_size == 0:
-                    logger.error(f"Аудио файл пуст: {wav_path}")
-                    return None
-                logger.info(f"Размер аудио файла для Vosk: {file_size/1024/1024:.2f} MB")
-            except Exception as e:
-                logger.error(f"Не удалось проверить размер файла: {e}")
-            
             with wave.open(wav_path, "rb") as wf:
                 if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
                     raise Exception("Неправильный формат аудио")
