@@ -242,44 +242,92 @@ class VideoHandler:
         """
         file_id = message.video.file_id
         file_path = os.path.join(self.downloads_dir, f"{file_id}.mp4")
+        progress_message = None
 
         try:
+            # Проверяем, что директория существует
+            os.makedirs(self.downloads_dir, exist_ok=True)
+            
+            # Проверяем права доступа к директории
+            if not os.access(self.downloads_dir, os.W_OK):
+                raise PermissionError(f"Нет прав на запись в директорию: {self.downloads_dir}")
+            
             file_size_mb = message.video.file_size / (1024 * 1024)
-            logger.info(f"Начало загрузки видео размером {file_size_mb:.2f} MB")
+            logger.info(f"Начало загрузки видео размером {file_size_mb:.2f} MB. Путь: {file_path}")
             
             # Инициализируем клиент, если еще не инициализирован
-            await self.init_client()
+            if not self.app or not self.app.is_connected:
+                await self.init_client()
+                logger.info("Клиент Pyrogram успешно инициализирован")
             
             # Создаем сообщение с прогрессом
             progress_message = await message.reply(
                 f"⏳ Загрузка видео: 0%\n({file_size_mb:.1f} MB)"
             )
             
-            # Скачиваем файл через MTProto с отслеживанием прогресса
-            await self.app.download_media(
-                message.video,
-                file_name=file_path,
-                progress=self._download_progress,
-                progress_args=(progress_message,)
-            )
+            # Попробуем скачать с использованием меньшего количества параметров
+            try:
+                logger.info(f"Попытка скачивания видео через Pyrogram в {file_path}")
+                downloaded_path = await self.app.download_media(
+                    message.video,
+                    file_name=file_path,
+                    progress=self._download_progress,
+                    progress_args=(progress_message,)
+                )
+                
+                logger.info(f"Результат скачивания: {downloaded_path}")
+                
+                # Если путь возвращен и отличается от ожидаемого, обновляем file_path
+                if downloaded_path and downloaded_path != file_path:
+                    logger.info(f"Обновляем путь к файлу с {file_path} на {downloaded_path}")
+                    file_path = downloaded_path
+                
+            except Exception as pyrogram_error:
+                logger.error(f"Ошибка при скачивании через Pyrogram: {pyrogram_error}")
+                # Попытка скачать через обычный API
+                try:
+                    logger.info("Попытка скачивания через API бота")
+                    file = await self.bot.get_file(file_id)
+                    await self.bot.download_file(file.file_path, file_path)
+                except Exception as bot_error:
+                    raise Exception(f"Не удалось скачать видео: {bot_error}")
 
+            # Проверяем, что файл действительно существует
             if not os.path.exists(file_path):
-                raise Exception("Файл не был загружен")
+                raise FileNotFoundError(f"Файл не был загружен по пути: {file_path}")
 
+            # Проверяем размер файла
             actual_size = os.path.getsize(file_path)
+            if actual_size == 0:
+                raise ValueError("Загруженный файл пуст")
+                
             logger.info(f"Видео успешно загружено. Размер: {actual_size/1024/1024:.2f} MB")
             
             # Удаляем сообщение с прогрессом
-            await progress_message.delete()
+            if progress_message:
+                await progress_message.delete()
             
             return file_path
 
         except Exception as e:
-            logger.error(f"Ошибка при скачивании видео: {str(e)}")
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            logger.error(f"Критическая ошибка при скачивании видео: {str(e)}")
+            # Пытаемся очистить файл, если он существует
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Удален незавершенный файл: {file_path}")
+                except Exception as clean_error:
+                    logger.error(f"Ошибка при удалении файла: {clean_error}")
+            
+            # Обновляем сообщение с ошибкой
+            if progress_message:
+                try:
+                    await progress_message.edit_text(f"❌ Ошибка загрузки видео: {str(e)[:100]}")
+                except:
+                    pass
+                    
             raise Exception(f"Ошибка при скачивании видео: {str(e)}")
-    
+
     async def close_client(self):
         """Закрытие Pyrogram клиента"""
         if self.app and self.app.is_connected:
@@ -543,6 +591,12 @@ class VideoHandler:
             data = await state.get_data()
             video_path = data.get('video_path')
             audio_path = data.get('audio_path')
+
+            # Проверяем наличие путей к аудио и видео
+            if not audio_path or not os.path.exists(audio_path):
+                logger.error(f"Аудио файл отсутствует или недоступен: {audio_path}")
+                await status_message.edit_text("❌ Ошибка: аудио файл не найден")
+                return
 
             # Добавляем цикл повторных попыток
             for attempt in range(max_retries):
@@ -839,251 +893,6 @@ class VideoHandler:
                 raise
 
     async def handle_language_selection(self, callback_query: types.CallbackQuery, state: FSMContext):
-        file_id = None
-        message_with_buttons = callback_query.message
-        user_id = callback_query.from_user.id
-        
-        try:
-            if user_id in self.active_users:
-                await callback_query.answer("⏳ Пожалуйста, дождитесь окончания обработки")
-                return
-                    
-            self.active_users.add(user_id)
-            await callback_query.answer()
-                        
-            data = await state.get_data()
-            video_path = data.get('video_path')
-            audio_path = data.get('audio_path')
-            wav_path = data.get('wav_path')
-            original_message = data.get('original_message')
-            request_type = data.get('request_type', 'url')
-
-            # Регистрируем файл для очистки
-            if video_path:
-                file_id = await self._register_file(video_path)
-                
-            if not all([original_message]) or not any([video_path, wav_path]):
-                await message_with_buttons.edit_text("❌ Произошла ошибка: файлы не найдены") 
-                return
-
-            lang = callback_query.data.split('_')[1]
-            await message_with_buttons.edit_text(f"🎯 Распознаю речь на {lang}...")
-
-            text = None
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    text = await self.transcriber.transcribe(wav_path, lang)
-                    if text:
-                        break
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    logger.error(f"Попытка {attempt + 1} распознавания не удалась: {e}")
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(2)
-
-            if text:
-                header = f"🎯 Распознанный текст ({lang}):\n\n"
-                if request_type == 'url' and video_path:
-                    service_type = data.get('service_type', 'unknown')
-                    filename = self.generate_video_filename(
-                        service_type=service_type,
-                        action='recognition',
-                        text_lang=lang
-                    )
-                    
-                    async with aiofiles.open(video_path, 'rb') as video_file:
-                        video_data = await video_file.read()
-                        
-                    if len(text) <= (1024 - len(header)):
-                        await self.app.send_video(
-                            chat_id=original_message.chat.id,
-                            video=video_path,
-                            caption=f"{header}{text}"
-                        )
-                    else:
-                        # Используем тот же путь к файлу для второго случая
-                        await self.app.send_video(
-                            chat_id=original_message.chat.id,
-                            video=video_path,
-                            caption=f"{header}(текст будет отправлен отдельно)"
-                        )
-                        # Отправляем текст отдельно
-                        for i in range(0, len(text), 4000):
-                            chunk = text[i:i + 4000]
-                            await asyncio.sleep(2)
-                            await self.app.send_message(
-                                chat_id=original_message.chat.id,
-                                text=chunk
-                            )
-                    
-                    # После успешной отправки очищаем все файлы
-                    if file_id:
-                        await self.cleanup_files(file_id)
-                        
-                else:
-                    for i in range(0, len(text), 4000):
-                        chunk = text[i:i + 4000]
-                        await asyncio.sleep(2)
-                        await original_message.reply(f"{header if i == 0 else ''}{chunk}")
-            else:
-                await original_message.reply("❌ Не удалось распознать текст")
-
-        except Exception as e:
-            error_msg = f"❌ Ошибка: {str(e)}"
-            logger.error(error_msg)
-            if message_with_buttons:
-                await message_with_buttons.edit_text(error_msg)
-        finally:
-            # Очищаем все файлы независимо от результата
-            if file_id:
-                await self.cleanup_files(file_id)
-                
-            if wav_path and os.path.exists(wav_path):
-                try:
-                    os.remove(wav_path)
-                except Exception as e:
-                    logger.error(f"Ошибка при удалении wav файла: {e}")
-            
-            if message_with_buttons:
-                try:
-                    await message_with_buttons.delete()
-                except Exception as e:
-                    logger.error(f"Ошибка при удалении сообщения: {e}")
-            
-            self.active_users.discard(user_id)
-
-    async def send_video_safe(self, chat_id: int, video_path: str, caption: str = None):
-        """Безопасная отправка видео с проверкой состояния клиента"""
-        try:
-            if not self.app or not self.app.is_connected:
-                await self.init_client()
-                
-            if not os.path.exists(video_path):
-                raise FileNotFoundError(f"Файл не найден: {video_path}")
-                
-            # Проверяем размер файла
-            file_size = os.path.getsize(video_path)
-            logger.info(f"Отправка видео размером: {file_size/1024/1024:.2f} MB")
-            
-            # Отправляем видео
-            await self.app.send_video(
-                chat_id=chat_id,
-                video=video_path,
-                caption=caption,
-                progress=self._upload_progress
-            )
-            logger.info(f"Видео успешно отправлено: {video_path}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Ошибка при отправке видео: {e}")
-            raise
-
-
-    async def send_video(self, chat_id: int, video_path: str, caption: str = None):
-        """Отправка видео через локальный сервер с потоковой передачей и таймаутами"""
-        try:
-            if not self.session:
-                await self.init_session()
-
-            # Проверяем существование файла
-            if not os.path.exists(video_path):
-                raise FileNotFoundError(f"Файл не найден: {video_path}")
-
-            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            logger.info(f"Подготовка к отправке видео размером {file_size_mb:.2f} MB")
-
-            # Формируем multipart данные с потоковой передачей
-            form = aiohttp.FormData()
-            form.add_field(
-                'video',
-                open(video_path, 'rb'),  # Файл читается потоково
-                filename=os.path.basename(video_path),
-                content_type='video/mp4'
-            )
-            form.add_field('chat_id', str(chat_id))
-            if caption:
-                form.add_field('caption', caption)
-
-            # Устанавливаем таймаут (10 минут на всю операцию)
-            timeout = aiohttp.ClientTimeout(total=600)
-
-            # Отправляем запрос с чанковой передачей
-            async with self.session.post(
-                f"/bot{BOT_TOKEN}/sendVideo",
-                data=form,
-                chunked=True,  # Включаем чанковую передачу
-                timeout=timeout
-            ) as response:
-                response.raise_for_status()
-                result = await response.json()
-                logger.info(f"Видео успешно отправлено: {video_path}")
-                return result
-
-        except asyncio.TimeoutError:
-            logger.error(f"Превышен таймаут при отправке видео: {video_path}")
-            raise Exception("Превышен таймаут отправки видео (10 минут)")
-        except FileNotFoundError as e:
-            logger.error(f"Файл не найден: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Ошибка при отправке видео через локальный сервер: {e}")
-            raise
-
-    async def handle_tts_command(self, message: types.Message, state: FSMContext):
-        """Обработка команды /tts"""
-        try:
-            user_id = message.from_user.id
-            if user_id in self.active_users:
-                await message.reply("⏳ Пожалуйста, дождитесь окончания обработки предыдущего запроса")
-                return
-                
-            self.active_users.add(user_id)
-            
-            # Получаем текст после команды
-            text = message.text.replace('/tts', '', 1).strip()
-            
-            if not text:
-                await message.reply(
-                    "ℹ️ Пожалуйста, добавьте текст после команды.\n"
-                    "Пример: /tts Привет, как дела?"
-                )
-                return
-                
-            # Проверяем длину текста
-            if len(text) > 1000:
-                await message.reply("⚠️ Текст слишком длинный. Максимум 1000 символов.")
-                return
-                
-            # Сохраняем текст в состояние
-            await state.update_data(tts_text=text)
-            
-            # Создаем клавиатуру с голосами
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=voice_data["name"],
-                        callback_data=f"voice_{voice_key}"
-                    )
-                    for voice_key, voice_data in ELEVENLABS_VOICES.items()
-                ]]
-            )
-            
-            # Отправляем сообщение с выбором голоса
-            await message.reply(
-                "🎤 Выберите голос для озвучивания:",
-                reply_markup=keyboard
-            )
-            
-        except Exception as e:
-            error_msg = f"❌ Ошибка при обработке команды: {str(e)}"
-            logger.error(error_msg)
-            await message.reply(error_msg)
-        finally:
-            self.active_users.discard(user_id)
-
-    async def handle_voice_selection(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработка выбора голоса"""
         try:
             message = callback_query.message
@@ -1205,7 +1014,16 @@ class VideoHandler:
                     raise
                     
             elif action == 'recognize':
-                wav_path = os.path.join(self.downloads_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}.wav")
+                # Безопасное создание пути к wav файлу
+                if video_path and os.path.exists(video_path):
+                    video_basename = os.path.basename(video_path)
+                    video_filename_without_ext = os.path.splitext(video_basename)[0]
+                    wav_path = os.path.join(self.downloads_dir, f"{video_filename_without_ext}.wav")
+                else:
+                    # Если путь к видео отсутствует или файл не существует, создаем временный путь для wav
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    wav_path = os.path.join(self.downloads_dir, f"temp_audio_{timestamp}.wav")
+                    logger.warning(f"Создан временный путь для wav файла: {wav_path}")
             
                 await message_with_buttons.edit_text("🎵 Извлекаю аудио из видео...")
                 
