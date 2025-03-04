@@ -54,7 +54,7 @@ class AudioHandler:
                 audio,
                 min_silence_len=min_silence_len,
                 silence_thresh=silence_thresh,
-                keep_silence=150
+                keep_silence=20
             )
             
             # Соединение сегментов
