@@ -1721,6 +1721,7 @@ class VideoHandler:
             'kuaishou': 'KS',
             'youtube': 'YT',
             'instagram': 'IG',
+            'pinterest': 'PT',
             'unknown': 'VIDEO'
         }.get(service_type, 'VIDEO')
         
