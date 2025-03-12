@@ -13,6 +13,7 @@ from pyrogram import Client
 import os
 from os import path
 import math
+import re
 
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -30,6 +31,7 @@ from services.tts_service import TTSService
 from services.audio_handler import AudioHandler
 from states.states import VideoProcessing
 from services.cobalt import CobaltDownloader
+from services.instagram_downloader import InstagramDownloader
 from services.connection_manager import ConnectionManager
 from services.video_streaming import VideoStreamingService
 from services.chunk_uploader import ChunkUploader
@@ -224,23 +226,48 @@ class VideoHandler:
             chat_id=message.chat.id
         )
 
-    def get_service_type(self, url: str) -> str:
-        """Определяет тип сервиса по URL"""
-        url = url.lower()
-        logger.info(f"Определение типа сервиса для URL: {url}")
+    
+
+    def get_service_type(self, url: str) -> tuple:
+        """Определяет тип сервиса по URL и возвращает чистый URL"""
+        url_lower = url.lower()
+        logger.info(f"Определение типа сервиса для URL: {url_lower}")
         
-        if 'youtube.com' in url or 'youtu.be' in url:
-            return 'youtube'
-        elif 'instagram.com' in url:
-            return 'instagram'
-        elif 'kuaishou.com' in url:
-            return 'kuaishou'
-        elif 'xiaohongshu.com' in url or 'xhslink.com' in url:
-            logger.info("Определен сервис: RedNote")
-            return 'rednote'
+        # Исходный URL по умолчанию
+        clean_url = url
+        
+        # Извлечение URL из сообщения, скопированного из приложения Xiaohongshu
+        if 'xhslink.com' in url_lower:
+            # Шаблон для поиска URL вида http://xhslink.com/X/XXXXX
+            pattern = r'(https?://xhslink\.com/[a-zA-Z0-9/]+)'
+            match = re.search(pattern, url)
+            if match:
+                # Сохраняем только сам URL без дополнительного текста
+                clean_url = match.group(1)
+                # Обновляем URL в логе для отладки
+                logger.info(f"Извлечен чистый URL: {clean_url}")
+            return 'rednote', clean_url
+        
+        # Для полных URL xiaohongshu.com - используем полный URL
+        elif 'xiaohongshu.com' in url_lower:
+            logger.info("Определен сервис: RedNote (полный URL)")
+            return 'rednote', url
+        
+        # Определение Pinterest ссылок
+        elif 'pinterest.com' in url_lower or 'pin.it' in url_lower:
+            logger.info("Определен сервис: Pinterest")
+            return 'pinterest', url
+        
+        # Для других сервисов
+        elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
+            return 'youtube', url
+        elif 'instagram.com' in url_lower or 'instagr.am' in url_lower:
+            return 'instagram', url
+        elif 'kuaishou.com' in url_lower:
+            return 'kuaishou', url
         
         logger.warning(f"Неизвестный тип сервиса для URL: {url}")
-        return 'unknown'
+        return 'unknown', url
 
 
     async def download_telegram_video(self, message: types.Message) -> str:
@@ -309,7 +336,7 @@ class VideoHandler:
             logger.error(f"Ошибка обновления прогресса: {e}")
 
     async def download_video(self, url: str, service_type: str) -> str:
-        """Загружает видео с разных сервисов"""
+        """Загружает видео с разных сервисов с использованием нескольких методов последовательно"""
         # Генерируем временные имена с использованием timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         temp_name = f"temp_{service_type}_{timestamp}"
@@ -318,120 +345,345 @@ class VideoHandler:
         temp_path = os.path.join(self.downloads_dir, f"{temp_name}.mp4")
         final_path = os.path.join(self.downloads_dir, f"{final_name}.mp4")
         
+        # Флаг для отслеживания успешной загрузки
+        download_success = False
+        error_messages = []
+        
         try:
-            if service_type == 'rednote':
-                max_attempts = 3
-                for attempt in range(max_attempts):
-                    try:
-                        success, message, video_info = await self.rednote.get_video_url(url)
-                        if success:
-                            video_url = video_info['video_url']
-                            if await self.rednote.download_video(video_url, temp_path):
-                                break
-                        
-                        if attempt < max_attempts - 1:
-                            wait_time = (attempt + 1) * 5
-                            logger.info(f"Повторная попытка через {wait_time} секунд...")
-                            await asyncio.sleep(wait_time)
-                        else:
-                            raise Exception(message)
-                    except Exception as e:
-                        if attempt == max_attempts - 1:
-                            raise
-                        logger.warning(f"Попытка {attempt + 1} не удалась: {str(e)}")
-                        await asyncio.sleep(5)
-                
-            elif service_type == 'kuaishou':
-                result = await self.kuaishou.download_video(url, temp_path)
-                if not result:
-                    raise Exception("Не удалось загрузить видео с Kuaishou")
-            else:
-                # Настраиваем заголовки
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1'
-                }
-
+            # ОБРАБОТКА INSTAGRAM
+            if service_type == 'instagram':
+                # Метод 1: Наш новый метод скачивания Instagram
                 try:
-                    logger.info("Попытка загрузки через yt-dlp...")
-                    ydl_opts = {
-                        # Формат указывает максимальное разрешение 1080p
-                        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
-                        'outtmpl': temp_path,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'extract_flat': False,
-                        'no_color': True,
-                        'http_headers': headers,
-                        'merge_output_format': 'mp4',
-                        'prefer_ffmpeg': True,
-                        # Постпроцессоры для обеспечения формата MP4 
-                        'postprocessors': [{
-                            'key': 'FFmpegVideoConvertor',
-                            'preferedformat': 'mp4',
-                        }],
-                        # Сортировка форматов с приоритетом высоких, но не более 1080p
-                        'format_sort': [
-                            'height:1080',        # Приоритет 1080p
-                            'height:720',         # Затем 720p
-                            'ext:mp4:m4a',        # Предпочитаем MP4
-                            'codec:h264:aac',     # H.264 и AAC кодеки
-                            'size',               # Размер файла
-                            'br',                 # Битрейт
-                            'fps',                # Частота кадров
-                            'quality', 
-                        ],
-                        'retries': 3,
-                        'fragment_retries': 3,
-                        'skip_unavailable_fragments': True,
-                        'keepvideo': True,
-                        'sleep_interval': 3,
-                        'max_sleep_interval': 6,
-                        'sleep_interval_requests': 1,
-                    }
-
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        logger.info("Начало загрузки видео...")
-                        ydl.download([url])
-                        logger.info("Видео успешно загружено")
-
-                except Exception as yt_error:
-                    logger.warning(f"yt-dlp не смог загрузить видео: {str(yt_error)}")
-                    logger.info("Пробуем загрузить через Cobalt API...")
+                    from services.instagram_downloader import InstagramDownloader
+                    logger.info("Попытка загрузки Instagram видео через новый API метод...")
                     
+                    instagram_dl = InstagramDownloader(self.downloads_dir)
+                    result_path = await instagram_dl.download_video(url, temp_path)
+                    
+                    if result_path and os.path.exists(result_path):
+                        if result_path != temp_path and os.path.exists(result_path):
+                            import shutil
+                            shutil.copy2(result_path, temp_path)
+                        logger.info(f"✅ Успешная загрузка Instagram видео через новый API метод")
+                        download_success = True
+                    else:
+                        error_messages.append("Не удалось загрузить через новый Instagram API метод")
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить Instagram видео через новый API метод: {e}")
+                    error_messages.append(f"Ошибка нового Instagram API метода: {str(e)}")
+                
+                # Метод 2: Через Cobalt, если новый метод не сработал
+                if not download_success:
                     try:
+                        logger.info("Попытка загрузки Instagram видео через Cobalt API...")
                         cobalt = CobaltDownloader()
                         downloaded_path = await cobalt.download_video(url)
                         if os.path.exists(downloaded_path):
                             os.rename(downloaded_path, temp_path)
+                            logger.info(f"✅ Успешная загрузка Instagram видео через Cobalt API")
+                            download_success = True
                         else:
-                            raise Exception("Файл не найден после загрузки через Cobalt")
-                    except Exception as cobalt_error:
-                        logger.error(f"Ошибка при загрузке через Cobalt: {str(cobalt_error)}")
-                        raise Exception("Не удалось загрузить видео ни одним из доступных методов")
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить Instagram видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Метод 3: Через yt-dlp, если предыдущие методы не сработали
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки Instagram видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка Instagram видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить Instagram видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = "Все методы загрузки Instagram видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+            
+            # ОБРАБОТКА REDNOTE
+            elif service_type == 'rednote':
+                # Метод 1: Наш сервис RedNote
+                try:
+                    logger.info("Попытка загрузки RedNote видео через специализированный метод...")
+                    max_attempts = 3
+                    for attempt in range(max_attempts):
+                        try:
+                            success, message, video_info = await self.rednote.get_video_url(url)
+                            if success:
+                                video_url = video_info['video_url']
+                                if await self.rednote.download_video(video_url, temp_path):
+                                    logger.info(f"✅ Успешная загрузка RedNote видео через специализированный метод (попытка {attempt+1})")
+                                    download_success = True
+                                    break
+                            
+                            if attempt < max_attempts - 1:
+                                wait_time = (attempt + 1) * 5
+                                logger.info(f"Повторная попытка через {wait_time} секунд...")
+                                await asyncio.sleep(wait_time)
+                            else:
+                                error_messages.append(message)
+                        except Exception as e:
+                            if attempt < max_attempts - 1:
+                                logger.warning(f"Попытка {attempt + 1} не удалась: {str(e)}")
+                                await asyncio.sleep(5)
+                            else:
+                                error_messages.append(f"Ошибка после {max_attempts} попыток: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить RedNote видео через специализированный метод: {e}")
+                    error_messages.append(f"Ошибка специализированного метода: {str(e)}")
+                
+                # Метод 2: Через Cobalt, если специализированный метод не сработал
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки RedNote видео через Cobalt API...")
+                        cobalt = CobaltDownloader()
+                        downloaded_path = await cobalt.download_video(url)
+                        if os.path.exists(downloaded_path):
+                            os.rename(downloaded_path, temp_path)
+                            logger.info(f"✅ Успешная загрузка RedNote видео через Cobalt API")
+                            download_success = True
+                        else:
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить RedNote видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Метод 3: Через yt-dlp, если предыдущие методы не сработали
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки RedNote видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка RedNote видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить RedNote видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = "Все методы загрузки RedNote видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+                    
+            # ОБРАБОТКА KUAISHOU
+            elif service_type == 'kuaishou':
+                # Метод 1: Специализированный метод для Kuaishou
+                try:
+                    logger.info("Попытка загрузки Kuaishou видео через специализированный метод...")
+                    result = await self.kuaishou.download_video(url, temp_path)
+                    if result and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                        logger.info(f"✅ Успешная загрузка Kuaishou видео через специализированный метод")
+                        download_success = True
+                    else:
+                        error_messages.append("Специализированный метод не смог загрузить видео")
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить Kuaishou видео через специализированный метод: {e}")
+                    error_messages.append(f"Ошибка специализированного метода: {str(e)}")
+                
+                # Метод 2: Через Cobalt, если специализированный метод не сработал
+                # if not download_success:
+                #     try:
+                #         logger.info("Попытка загрузки Kuaishou видео через Cobalt API...")
+                #         cobalt = CobaltDownloader()
+                #         downloaded_path = await cobalt.download_video(url)
+                #         if os.path.exists(downloaded_path):
+                #             os.rename(downloaded_path, temp_path)
+                #             logger.info(f"✅ Успешная загрузка Kuaishou видео через Cobalt API")
+                #             download_success = True
+                #         else:
+                #             error_messages.append("Файл не найден после загрузки через Cobalt")
+                #     except Exception as e:
+                #         logger.warning(f"❌ Не удалось загрузить Kuaishou видео через Cobalt: {e}")
+                #         error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Метод 3: Через yt-dlp, если предыдущие методы не сработали
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки Kuaishou видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка Kuaishou видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить Kuaishou видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = "Все методы загрузки Kuaishou видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+            # ОБРАБОТКА PINTEREST
+            elif service_type == 'pinterest':
+                # Для Pinterest используем только Cobalt метод
+                try:
+                    logger.info("Попытка загрузки Pinterest видео через Cobalt API...")
+                    cobalt = CobaltDownloader()
+                    downloaded_path = await cobalt.download_video(url)
+                    
+                    if downloaded_path and os.path.exists(downloaded_path):
+                        # Копируем или перемещаем файл в нужное место
+                        if downloaded_path != temp_path:
+                            import shutil
+                            shutil.copy2(downloaded_path, temp_path)
+                            logger.info(f"Скопировано видео из {downloaded_path} в {temp_path}")
+                        
+                        logger.info(f"✅ Успешная загрузка Pinterest видео через Cobalt API")
+                        download_success = True
+                    else:
+                        error_messages.append("Файл не найден после загрузки через Cobalt")
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить Pinterest видео через Cobalt: {e}")
+                    error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Если метод не сработал
+                if not download_success:
+                    error_message = "Не удалось загрузить Pinterest видео через Cobalt:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+                    
+            # ОБРАБОТКА ДРУГИХ СЕРВИСОВ (YouTube и прочие)
+            else:
+                # Метод 1: Через yt-dlp (основной для YouTube и других)
+                try:
+                    logger.info(f"Попытка загрузки {service_type} видео через yt-dlp...")
+                    await self._download_with_ytdlp(url, temp_path)
+                    
+                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                        logger.info(f"✅ Успешная загрузка {service_type} видео через yt-dlp")
+                        download_success = True
+                    else:
+                        error_messages.append("yt-dlp загрузил пустой файл")
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить {service_type} видео через yt-dlp: {e}")
+                    error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                
+                # Метод 2: Через Cobalt, если yt-dlp не сработал
+                if not download_success:
+                    try:
+                        logger.info(f"Попытка загрузки {service_type} видео через Cobalt API...")
+                        cobalt = CobaltDownloader()
+                        downloaded_path = await cobalt.download_video(url)
+                        if os.path.exists(downloaded_path):
+                            os.rename(downloaded_path, temp_path)
+                            logger.info(f"✅ Успешная загрузка {service_type} видео через Cobalt API")
+                            download_success = True
+                        else:
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить {service_type} видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = f"Все методы загрузки {service_type} видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
 
             # Проверяем успешность загрузки
             if not os.path.exists(temp_path):
-                raise Exception("Видео не было загружено")
+                raise Exception("Видео не было загружено, файл не существует")
                 
-            # Просто перемещаем файл
+            # Проверяем размер файла
+            file_size = os.path.getsize(temp_path)
+            if file_size == 0:
+                raise Exception("Загружен пустой файл (0 байт)")
+                
+            # Перемещаем файл в конечный путь
             os.rename(temp_path, final_path)
+            logger.info(f"✅ Видео успешно загружено и сохранено в {final_path} (размер: {file_size/1024/1024:.2f} МБ)")
             return final_path
 
         except Exception as e:
-            logger.error(f"Ошибка при загрузке видео: {str(e)}")
+            logger.error(f"❌ Критическая ошибка при загрузке видео: {str(e)}")
+            # Очищаем временные файлы
             for path in [temp_path, final_path]:
                 if path and os.path.exists(path):
-                    os.remove(path)
+                    try:
+                        os.remove(path)
+                        logger.info(f"Удален временный файл: {path}")
+                    except Exception as clean_error:
+                        logger.error(f"Ошибка при удалении файла {path}: {clean_error}")
             raise
+
+        # Вспомогательный метод для скачивания через yt-dlp
+    async def _download_with_ytdlp(self, url: str, output_path: str) -> bool:
+        """Скачивание видео через yt-dlp"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        }
+        
+        ydl_opts = {
+            # Формат указывает максимальное разрешение 1080p
+            'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'no_color': True,
+            'http_headers': headers,
+            'merge_output_format': 'mp4',
+            'prefer_ffmpeg': True,
+            # Постпроцессоры для обеспечения формата MP4 
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+            # Сортировка форматов с приоритетом высоких, но не более 1080p
+            'format_sort': [
+                'height:1080',        # Приоритет 1080p
+                'height:720',         # Затем 720p
+                'ext:mp4:m4a',        # Предпочитаем MP4
+                'codec:h264:aac',     # H.264 и AAC кодеки
+                'size',               # Размер файла
+                'br',                 # Битрейт
+                'fps',                # Частота кадров
+                'quality', 
+            ],
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            'keepvideo': True,
+            'sleep_interval': 3,
+            'max_sleep_interval': 6,
+            'sleep_interval_requests': 1,
+        }
+        
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: yt_dlp.YoutubeDL(ydl_opts).download([url])
+        )
+        
+        # Проверяем, существует ли файл и не пустой ли он
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return True
+        return False
 
     async def get_available_formats(self, url: str) -> list:
         """Получение информации о доступных форматах видео"""
@@ -484,12 +736,12 @@ class VideoHandler:
                 request_type='url'
             )
             
-            # Определяем тип сервиса
-            service_type = self.get_service_type(message.text)
+            # Определяем тип сервиса и извлекаем чистый URL
+            service_type, url_to_process = self.get_service_type(message.text)
             status_message = await message.reply("⏳ Начинаю загрузку видео...")
             
-            # Загружаем видео
-            video_path = await self.download_video(message.text, service_type)
+            # Загружаем видео с использованием очищенного URL
+            video_path = await self.download_video(url_to_process, service_type)
             
             # После успешной загрузки обновляем состояние
             await state.update_data(
@@ -518,7 +770,7 @@ class VideoHandler:
             self.db.log_url(
                 user_id=message.from_user.id,
                 username=message.from_user.username,
-                url=message.text,
+                url=url_to_process,  # Логируем очищенный URL
                 status="success"
             )
 

@@ -52,6 +52,7 @@ class CobaltDownloader:
                     action='submit'
                 )
             )
+            logger.info(f"Капча успешно решена: {result['code'][:20]}...")
             return result['code']
         except Exception as e:
             logger.error(f"Ошибка при решении капчи: {e}")
@@ -61,31 +62,46 @@ class CobaltDownloader:
         """Асинхронное создание сессии"""
         turnstile_token = await self.solve_turnstile()
         if not turnstile_token:
+            logger.error("Не удалось получить токен капчи")
             return False
 
         headers = self.headers.copy()
+        # Добавляем заголовок с решением капчи
         headers["cf-turnstile-response"] = turnstile_token
 
         try:
             async with aiohttp.ClientSession() as session:
+                # Отправляем POST запрос на endpoint /session
                 async with session.post(
                     f"{self.base_url}/session",
-                    headers=headers
+                    headers=headers,
+                    json={}  # Пустое тело запроса, если требуется
                 ) as response:
                     if response.status == 429:
                         retry_after = int(response.headers.get('ratelimit-reset', 60))
                         logger.warning(f"Превышен лимит запросов. Ожидание {retry_after} секунд...")
                         await asyncio.sleep(retry_after)
                         return await self.create_session()
-
-                    response.raise_for_status()
+                    
+                    # Проверяем статус ответа
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Ошибка создания сессии. Статус: {response.status}. Ответ: {error_text}")
+                        return False
+                    
+                    # Получаем данные сессии
                     session_data = await response.json()
+                    logger.debug(f"Ответ сервера: {session_data}")
                     
                     self.token = session_data.get("token")
                     self.token_expiry = session_data.get("exp")
                     
+                    if not self.token:
+                        logger.error("Токен не найден в ответе сервера")
+                        return False
+                    
                     logger.info(f"Сессия успешно создана. Token: {self.token[:20]}...")
-                    return bool(self.token)
+                    return True
 
         except Exception as e:
             logger.error(f"Ошибка при создании сессии: {e}")
@@ -93,7 +109,9 @@ class CobaltDownloader:
 
     async def process_video(self, url: str) -> Dict:
         """Асинхронная обработка видео"""
+        # Проверяем наличие токена
         if not self.token:
+            logger.info("Токен отсутствует, создаем новую сессию...")
             if not await self.create_session():
                 raise Exception("Не удалось создать сессию")
 
@@ -102,27 +120,50 @@ class CobaltDownloader:
 
         try:
             async with aiohttp.ClientSession() as session:
+                # Отправляем запрос с URL видео
                 async with session.post(
-                    self.base_url,
+                    f"{self.base_url}/",  # Корректный endpoint для обработки видео
                     headers=headers,
                     json={"url": url}
                 ) as response:
-                    response.raise_for_status()
+                    if response.status == 401:
+                        logger.warning("Токен устарел, создаем новую сессию...")
+                        if await self.create_session():
+                            return await self.process_video(url)
+                        else:
+                            raise Exception("Не удалось обновить сессию")
+                    
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Ошибка обработки видео. Статус: {response.status}. Ответ: {error_text}")
+                        raise Exception(f"Ошибка API: {error_text}")
+                    
                     data = await response.json()
-                    logger.info(f"Cobalt API response: {data}")
+                    logger.info(f"Cobalt API ответ: {json.dumps(data, ensure_ascii=False)}")
                     return data
 
         except aiohttp.ClientError as e:
             logger.error(f"Ошибка при обработке видео: {e}")
             if 'response' in locals():
-                error_text = await response.text()
-                logger.error(f"Ответ сервера: {error_text}")
+                try:
+                    error_text = await response.text()
+                    logger.error(f"Ответ сервера: {error_text}")
+                except:
+                    pass
             raise
 
     def download_video_sync(self, url: str, output_path: str) -> bool:
         """Синхронное скачивание видео используя requests"""
         try:
-            response = requests.get(url, stream=True)
+            # Добавляем случайные заголовки для имитации браузера
+            download_headers = {
+                'User-Agent': self.headers['user-agent'],
+                'Accept': 'video/webm,video/mp4,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+                'Accept-Language': 'ru,en;q=0.9',
+                'Referer': 'https://cobalt.tools/'
+            }
+            
+            response = requests.get(url, stream=True, headers=download_headers)
             response.raise_for_status()
             
             # Создаем временный файл
@@ -166,17 +207,17 @@ class CobaltDownloader:
     async def download_video(self, video_url: str) -> str:
         """Асинхронное скачивание видео"""
         try:
-            logger.info("Получение информации о видео...")
+            logger.info(f"Получение информации о видео: {video_url}")
             result = await self.process_video(video_url)
             
             if not result:
                 raise Exception("Пустой ответ от API")
 
             download_url = result.get("url")
-            filename = result.get("filename", "video.mp4")
+            filename = result.get("filename", f"video_{int(time.time())}.mp4")
             
             if not download_url:
-                raise Exception("URL для скачивания не найден")
+                raise Exception("URL для скачивания не найден в ответе API")
 
             output_path = os.path.join(self.default_download_path, filename)
             logger.info(f"Начало загрузки файла: {filename}")
@@ -196,8 +237,8 @@ class CobaltDownloader:
 
         except Exception as e:
             logger.error(f"Произошла ошибка при загрузке: {e}")
-            if 'output_path' in locals() and os.path.exists(output_path):
-                os.remove(output_path)
+            if 'output_path' in locals() and os.path.exists(f"{output_path}.temp"):
+                os.remove(f"{output_path}.temp")
             raise
 
     async def cleanup(self):
@@ -213,16 +254,16 @@ class CobaltDownloader:
             logger.error(f"Ошибка при очистке временных файлов: {e}")
 
 
-async def main():
-    try:
-        downloader = CobaltDownloader()
-        video_url = "https://www.youtube.com/watch?v=lRAYCrGDQaA&rco=1"  # укажите URL вашего видео
-        output_path = await downloader.download_video(video_url)
-        print(f"Видео успешно загружено: {output_path}")
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        await downloader.cleanup()
+# async def main():
+#     try:
+#         downloader = CobaltDownloader()
+#         video_url = "https://www.youtube.com/shorts/r6c-sufelSQ"  # укажите URL вашего видео
+#         output_path = await downloader.download_video(video_url)
+#         print(f"Видео успешно загружено: {output_path}")
+#     except Exception as e:
+#         print(f"Ошибка: {e}")
+#     finally:
+#         await downloader.cleanup()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# if __name__ == "__main__":
+#     asyncio.run(main())
