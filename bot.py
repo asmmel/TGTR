@@ -94,7 +94,7 @@ class VideoBot:
             await message.reply(welcome_text)
             await state.set_state(VideoProcessing.WAITING_FOR_VIDEO)
 
-        @self.dp.message(lambda m: m.text and any(x in m.text.lower() for x in ['youtube.com', 'youtu.be', 'instagram.com', 'kuaishou.com']))
+        @self.dp.message(lambda m: m.text and any(x in m.text.lower() for x in ['youtube.com', 'youtu.be', 'instagram.com', 'kuaishou.com', 'pin.it', 'pinterest.com']))
         async def url_handler(message: types.Message, state: FSMContext):
             if message.from_user.id in self.video_handler.active_users:
                 await message.reply("⏳ Пожалуйста, дождитесь окончания обработки предыдущего запроса")
