@@ -43,7 +43,7 @@ class AudioHandler:
         input_path: str,
         output_path: str,
         min_silence_len: int = 100,
-        silence_thresh: int = -40
+        silence_thresh: int = -50
     ):
         """Удаление пауз из аудио"""
         try:
