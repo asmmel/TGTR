@@ -42,7 +42,7 @@ class AudioHandler:
         self,
         input_path: str,
         output_path: str,
-        min_silence_len: int = 100,
+        min_silence_len: int = 50,
         silence_thresh: int = -50
     ):
         """Удаление пауз из аудио"""
@@ -54,7 +54,7 @@ class AudioHandler:
                 audio,
                 min_silence_len=min_silence_len,
                 silence_thresh=silence_thresh,
-                keep_silence=100
+                keep_silence=50
             )
             
             # Соединение сегментов
