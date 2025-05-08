@@ -97,7 +97,7 @@ TTS_CONFIG = {
 ELEVENLABS_VOICES = {
     "george": {
         "name": "Стандарт",
-        "id": "JBFqnCBsd6RMkjVDRZzb",
+        "id": "3P8yG1HbDVyoUhJSaBnC",
         "stability": 0.5,
         "similarity_boost": 0.75
     },

@@ -3,7 +3,6 @@ import logging
 import aiohttp
 import uuid
 from datetime import datetime
-from typing import Optional
 import asyncio
 import aiofiles
 from typing import Optional, List
@@ -368,9 +367,11 @@ class VideoHandler:
                         download_success = True
                     else:
                         error_messages.append("Не удалось загрузить через новый Instagram API метод")
+                        download_success = False  # Явно устанавливаем в False для безопасности
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить Instagram видео через новый API метод: {e}")
                     error_messages.append(f"Ошибка нового Instagram API метода: {str(e)}")
+                    download_success = False  # Явно устанавливаем в False
                 
                 # Метод 2: Через Cobalt, если новый метод не сработал
                 if not download_success:
@@ -378,15 +379,17 @@ class VideoHandler:
                         logger.info("Попытка загрузки Instagram видео через Cobalt API...")
                         cobalt = CobaltDownloader()
                         downloaded_path = await cobalt.download_video(url)
-                        if os.path.exists(downloaded_path):
+                        if downloaded_path and os.path.exists(downloaded_path):
                             os.rename(downloaded_path, temp_path)
                             logger.info(f"✅ Успешная загрузка Instagram видео через Cobalt API")
                             download_success = True
                         else:
                             error_messages.append("Файл не найден после загрузки через Cobalt")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить Instagram видео через Cobalt: {e}")
                         error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        download_success = False
                 
                 # Метод 3: Через yt-dlp, если предыдущие методы не сработали
                 if not download_success:
@@ -399,9 +402,11 @@ class VideoHandler:
                             download_success = True
                         else:
                             error_messages.append("yt-dlp загрузил пустой файл")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить Instagram видео через yt-dlp: {e}")
                         error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                        download_success = False
                 
                 # Если все методы не сработали
                 if not download_success:
@@ -431,15 +436,18 @@ class VideoHandler:
                                 await asyncio.sleep(wait_time)
                             else:
                                 error_messages.append(message)
+                                download_success = False
                         except Exception as e:
                             if attempt < max_attempts - 1:
                                 logger.warning(f"Попытка {attempt + 1} не удалась: {str(e)}")
                                 await asyncio.sleep(5)
                             else:
                                 error_messages.append(f"Ошибка после {max_attempts} попыток: {str(e)}")
+                                download_success = False
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить RedNote видео через специализированный метод: {e}")
                     error_messages.append(f"Ошибка специализированного метода: {str(e)}")
+                    download_success = False
                 
                 # Метод 2: Через Cobalt, если специализированный метод не сработал
                 if not download_success:
@@ -447,15 +455,17 @@ class VideoHandler:
                         logger.info("Попытка загрузки RedNote видео через Cobalt API...")
                         cobalt = CobaltDownloader()
                         downloaded_path = await cobalt.download_video(url)
-                        if os.path.exists(downloaded_path):
+                        if downloaded_path and os.path.exists(downloaded_path):
                             os.rename(downloaded_path, temp_path)
                             logger.info(f"✅ Успешная загрузка RedNote видео через Cobalt API")
                             download_success = True
                         else:
                             error_messages.append("Файл не найден после загрузки через Cobalt")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить RedNote видео через Cobalt: {e}")
                         error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        download_success = False
                 
                 # Метод 3: Через yt-dlp, если предыдущие методы не сработали
                 if not download_success:
@@ -468,9 +478,11 @@ class VideoHandler:
                             download_success = True
                         else:
                             error_messages.append("yt-dlp загрузил пустой файл")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить RedNote видео через yt-dlp: {e}")
                         error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                        download_success = False
                 
                 # Если все методы не сработали
                 if not download_success:
@@ -489,25 +501,29 @@ class VideoHandler:
                         download_success = True
                     else:
                         error_messages.append("Специализированный метод не смог загрузить видео")
+                        download_success = False
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить Kuaishou видео через специализированный метод: {e}")
                     error_messages.append(f"Ошибка специализированного метода: {str(e)}")
+                    download_success = False
                 
                 # Метод 2: Через Cobalt, если специализированный метод не сработал
-                # if not download_success:
-                #     try:
-                #         logger.info("Попытка загрузки Kuaishou видео через Cobalt API...")
-                #         cobalt = CobaltDownloader()
-                #         downloaded_path = await cobalt.download_video(url)
-                #         if os.path.exists(downloaded_path):
-                #             os.rename(downloaded_path, temp_path)
-                #             logger.info(f"✅ Успешная загрузка Kuaishou видео через Cobalt API")
-                #             download_success = True
-                #         else:
-                #             error_messages.append("Файл не найден после загрузки через Cobalt")
-                #     except Exception as e:
-                #         logger.warning(f"❌ Не удалось загрузить Kuaishou видео через Cobalt: {e}")
-                #         error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки Kuaishou видео через Cobalt API...")
+                        cobalt = CobaltDownloader()
+                        downloaded_path = await cobalt.download_video(url)
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            os.rename(downloaded_path, temp_path)
+                            logger.info(f"✅ Успешная загрузка Kuaishou видео через Cobalt API")
+                            download_success = True
+                        else:
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                            download_success = False
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить Kuaishou видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        download_success = False
                 
                 # Метод 3: Через yt-dlp, если предыдущие методы не сработали
                 if not download_success:
@@ -520,18 +536,21 @@ class VideoHandler:
                             download_success = True
                         else:
                             error_messages.append("yt-dlp загрузил пустой файл")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить Kuaishou видео через yt-dlp: {e}")
                         error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                        download_success = False
                 
                 # Если все методы не сработали
                 if not download_success:
                     error_message = "Все методы загрузки Kuaishou видео не удались:\n" + "\n".join(error_messages)
                     logger.error(error_message)
                     raise Exception(error_message)
+            
             # ОБРАБОТКА PINTEREST
             elif service_type == 'pinterest':
-                # Для Pinterest используем только Cobalt метод
+                # Метод 1: Через Cobalt для Pinterest
                 try:
                     logger.info("Попытка загрузки Pinterest видео через Cobalt API...")
                     cobalt = CobaltDownloader()
@@ -548,13 +567,32 @@ class VideoHandler:
                         download_success = True
                     else:
                         error_messages.append("Файл не найден после загрузки через Cobalt")
+                        download_success = False
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить Pinterest видео через Cobalt: {e}")
                     error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                    download_success = False
                 
-                # Если метод не сработал
+                # Метод 2: Через yt-dlp, если Cobalt не сработал
                 if not download_success:
-                    error_message = "Не удалось загрузить Pinterest видео через Cobalt:\n" + "\n".join(error_messages)
+                    try:
+                        logger.info("Попытка загрузки Pinterest видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка Pinterest видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                            download_success = False
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить Pinterest видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                        download_success = False
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = "Все методы загрузки Pinterest видео не удались:\n" + "\n".join(error_messages)
                     logger.error(error_message)
                     raise Exception(error_message)
                     
@@ -570,9 +608,11 @@ class VideoHandler:
                         download_success = True
                     else:
                         error_messages.append("yt-dlp загрузил пустой файл")
+                        download_success = False
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить {service_type} видео через yt-dlp: {e}")
                     error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                    download_success = False
                 
                 # Метод 2: Через Cobalt, если yt-dlp не сработал
                 if not download_success:
@@ -580,15 +620,17 @@ class VideoHandler:
                         logger.info(f"Попытка загрузки {service_type} видео через Cobalt API...")
                         cobalt = CobaltDownloader()
                         downloaded_path = await cobalt.download_video(url)
-                        if os.path.exists(downloaded_path):
+                        if downloaded_path and os.path.exists(downloaded_path):
                             os.rename(downloaded_path, temp_path)
                             logger.info(f"✅ Успешная загрузка {service_type} видео через Cobalt API")
                             download_success = True
                         else:
                             error_messages.append("Файл не найден после загрузки через Cobalt")
+                            download_success = False
                     except Exception as e:
                         logger.warning(f"❌ Не удалось загрузить {service_type} видео через Cobalt: {e}")
                         error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        download_success = False
                 
                 # Если все методы не сработали
                 if not download_success:
