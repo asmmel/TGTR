@@ -598,39 +598,41 @@ class VideoHandler:
                     
             # ОБРАБОТКА ДРУГИХ СЕРВИСОВ (YouTube и прочие)
             else:
-                # Метод 1: Через yt-dlp (основной для YouTube и других)
+                # Метод 1: Через Cobalt (основной для YouTube и других)
                 try:
-                    logger.info(f"Попытка загрузки {service_type} видео через yt-dlp...")
-                    await self._download_with_ytdlp(url, temp_path)
-                    
-                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                        logger.info(f"✅ Успешная загрузка {service_type} видео через yt-dlp")
+                    logger.info(f"Попытка загрузки {service_type} видео через Cobalt API...")
+                    cobalt = CobaltDownloader()
+                    downloaded_path = await cobalt.download_video(url)
+                    if downloaded_path and os.path.exists(downloaded_path):
+                        os.rename(downloaded_path, temp_path)
+                        logger.info(f"✅ Успешная загрузка {service_type} видео через Cobalt API")
                         download_success = True
                     else:
-                        error_messages.append("yt-dlp загрузил пустой файл")
+                        error_messages.append("Файл не найден после загрузки через Cobalt")
                         download_success = False
                 except Exception as e:
-                    logger.warning(f"❌ Не удалось загрузить {service_type} видео через yt-dlp: {e}")
-                    error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                    logger.warning(f"❌ Не удалось загрузить {service_type} видео через Cobalt: {e}")
+                    error_messages.append(f"Ошибка Cobalt: {str(e)}")
                     download_success = False
+                    
                 
-                # Метод 2: Через Cobalt, если yt-dlp не сработал
+                # Метод 2: Через yt-dlp , если Cobalt не сработал
                 if not download_success:
                     try:
-                        logger.info(f"Попытка загрузки {service_type} видео через Cobalt API...")
-                        cobalt = CobaltDownloader()
-                        downloaded_path = await cobalt.download_video(url)
-                        if downloaded_path and os.path.exists(downloaded_path):
-                            os.rename(downloaded_path, temp_path)
-                            logger.info(f"✅ Успешная загрузка {service_type} видео через Cobalt API")
+                        logger.info(f"Попытка загрузки {service_type} видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка {service_type} видео через yt-dlp")
                             download_success = True
                         else:
-                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                            error_messages.append("yt-dlp загрузил пустой файл")
                             download_success = False
                     except Exception as e:
-                        logger.warning(f"❌ Не удалось загрузить {service_type} видео через Cobalt: {e}")
-                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        logger.warning(f"❌ Не удалось загрузить {service_type} видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
                         download_success = False
+                        
                 
                 # Если все методы не сработали
                 if not download_success:
