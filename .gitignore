@@ -48,3 +48,5 @@ package-lock.json
 yarn.lock
 npm-debug.log
 bot Доделать.py
+test_red_down.py
+test_inst_down.py

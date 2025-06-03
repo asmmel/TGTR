@@ -127,7 +127,25 @@ class RedNoteDownloader:
         ]
         self.accept_languages = ["zh-CN,zh;q=0.9,en;q=0.8", "en-US,en;q=0.9"]
         self.update_headers()
-        self.xhs = XHSDownloader()  # Добавляем новый загрузчик
+        self.xhs = XHSDownloader()
+        
+        # Настройки для нового API anydownloader.com
+        self.anydownloader_api_url = "https://anydownloader.com/wp-json/aio-dl/video-data/"
+        self.anydownloader_headers = {
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'ru,en;q=0.9,de;q=0.8,pt;q=0.7',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://anydownloader.com',
+            'Referer': 'https://anydownloader.com/en/xiaohongshu-videos-and-photos-downloader/',
+            'Sec-Ch-Ua': '"Chromium";v="134", "Not:A-Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36'
+        }
 
     def update_headers(self):
         """Обновление заголовков с случайными значениями"""
@@ -157,9 +175,69 @@ class RedNoteDownloader:
             logger.error(f"Ошибка при извлечении ID видео: {e}")
             return None
 
+    def get_video_data_anydownloader(self, video_url: str) -> Tuple[bool, str, Optional[Dict]]:
+        """Новый метод получения данных через anydownloader.com API"""
+        try:
+            # Создаем отдельную сессию для anydownloader
+            anydownloader_session = requests.Session()
+            anydownloader_session.headers.update(self.anydownloader_headers)
+            
+            # Сначала загружаем главную страницу для получения куки
+            try:
+                anydownloader_session.get('https://anydownloader.com/en/xiaohongshu-videos-and-photos-downloader/')
+            except:
+                pass
+            
+            payload = {
+                'url': video_url,
+                'token': '',
+                'lang': 'en'
+            }
+            
+            response = anydownloader_session.post(
+                self.anydownloader_api_url,
+                data=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            anydownloader_session.close()
+            
+            if 'medias' in data and data['medias']:
+                logger.info(f"AnyDownloader API: Найдено {len(data['medias'])} вариантов видео")
+                return True, "Успешно получено через AnyDownloader API", data
+            else:
+                return False, "AnyDownloader API: Не найдены медиа файлы", None
+                
+        except requests.RequestException as e:
+            logger.error(f"AnyDownloader API ошибка запроса: {e}")
+            return False, f"Ошибка запроса к AnyDownloader API: {str(e)}", None
+        except json.JSONDecodeError as e:
+            logger.error(f"AnyDownloader API ошибка JSON: {e}")
+            return False, f"Ошибка декодирования ответа AnyDownloader API: {str(e)}", None
+        except Exception as e:
+            logger.error(f"AnyDownloader API неожиданная ошибка: {e}")
+            return False, f"Неожиданная ошибка AnyDownloader API: {str(e)}", None
+        finally:
+            try:
+                anydownloader_session.close()
+            except:
+                pass
+
     async def get_video_url(self, url: str, max_retries: int = 3) -> Tuple[bool, str, Optional[Dict]]:
-        """Получение URL видео с двумя этапами: сначала XHSDownloader, затем API"""
-        # Этап 1: Пробуем через XHSDownloader
+        """Получение URL видео с новым методом в приоритете"""
+        
+        # Этап 1: Пробуем через новый AnyDownloader API
+        logger.info("Попытка получить видео через AnyDownloader API")
+        success, message, video_data = self.get_video_data_anydownloader(url)
+        if success:
+            logger.info("✅ Успешно получено через AnyDownloader API")
+            return True, "Успешно получено через AnyDownloader API", video_data
+        
+        logger.info(f"AnyDownloader API не сработал: {message}. Переходим к XHSDownloader.")
+
+        # Этап 2: Пробуем через XHSDownloader
         logger.info("Попытка получить видео через XHSDownloader")
         success, message, video_info = self.xhs.get_video_info(url)
         if success:
@@ -167,7 +245,7 @@ class RedNoteDownloader:
         
         logger.info(f"XHSDownloader не сработал: {message}. Переходим к API.")
 
-        # Этап 2: Пробуем через API rndownloader.app
+        # Этап 3: Пробуем через API rndownloader.app (оригинальный код)
         for attempt in range(max_retries):
             try:
                 video_id = self.extract_video_id(url)
@@ -231,13 +309,99 @@ class RedNoteDownloader:
 
         return False, "Превышено количество попыток получения информации о видео", None
 
+    def download_video_from_anydownloader(self, medias: list, output_path: str, title: str = "") -> bool:
+        """Скачивание видео из данных AnyDownloader с fallback логикой"""
+        if not medias:
+            logger.error("Нет доступных ссылок для скачивания")
+            return False
+        
+        logger.info(f"Найдено {len(medias)} вариантов для скачивания")
+        
+        for i, media in enumerate(medias):
+            video_url = media.get('url')
+            if not video_url:
+                continue
+                
+            quality = media.get('quality', f'version_{i+1}')
+            size_info = media.get('formattedSize', 'Unknown size')
+            
+            logger.info(f"Попытка скачивания (вариант {i+1}/{len(medias)}): {quality} ({size_info})")
+            
+            try:
+                response = requests.get(video_url, stream=True, timeout=60)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                last_percentage = -1
+                target_percentages = [0, 25, 50, 75, 100]
+                
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0:
+                                current_percentage = int((downloaded / total_size) * 100)
+                                for target in target_percentages:
+                                    if last_percentage < target <= current_percentage:
+                                        logger.info(f"Скачивание (AnyDownloader): {target}%")
+                                        last_percentage = current_percentage
+                                        break
+                
+                if last_percentage < 100 and downloaded >= total_size:
+                    logger.info(f"Скачивание (AnyDownloader): 100%")
+                
+                logger.info(f"✅ Видео успешно скачано: {output_path}")
+                return True
+                
+            except requests.RequestException as e:
+                logger.error(f"❌ Ошибка при скачивании с варианта {i+1}: {e}")
+                # Удаляем частично скачанный файл
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                except:
+                    pass
+                continue
+            except Exception as e:
+                logger.error(f"❌ Неожиданная ошибка при скачивании: {e}")
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                except:
+                    pass
+                continue
+        
+        logger.error("❌ Не удалось скачать видео ни с одной из ссылок")
+        return False
+
     async def download_video(self, video_url: str, output_path: str) -> bool:
-        """Скачивание видео с использованием XHSDownloader как основного метода"""
-        # Сначала пробуем через XHSDownloader
+        """Скачивание видео с поддержкой нового формата данных"""
+        
+        # Если video_url это словарь с данными от AnyDownloader
+        if isinstance(video_url, dict):
+            if 'medias' in video_url and video_url['medias']:
+                logger.info("Используем AnyDownloader для скачивания")
+                title = video_url.get('title', '')
+                return self.download_video_from_anydownloader(
+                    video_url['medias'], 
+                    output_path, 
+                    title
+                )
+            elif 'video_url' in video_url:
+                # Извлекаем URL из словаря для совместимости
+                video_url = video_url['video_url']
+            else:
+                logger.error("Неверный формат данных видео")
+                return False
+
+        # Сначала пробуем через XHSDownloader как основной метод
         if self.xhs.download_video(video_url, output_path):
             return True
         
-        # Если не получилось, пробуем старый метод
+        # Если не получилось, пробуем старый метод (оригинальный код)
         try:
             self.update_headers()
             response = self.session.get(video_url, stream=True, timeout=30)
