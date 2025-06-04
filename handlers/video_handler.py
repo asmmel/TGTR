@@ -349,8 +349,111 @@ class VideoHandler:
         error_messages = []
         
         try:
+            # ОБРАБОТКА REDNOTE - ИСПРАВЛЕНО
+            if service_type == 'rednote':
+                # Метод 1: Специализированный RedNoteDownloader (в приоритете)
+                try:
+                    logger.info("Попытка загрузки RedNote видео через RedNoteDownloader...")
+                    max_attempts = 3
+                    for attempt in range(max_attempts):
+                        try:
+                            success, message, video_info = await self.rednote.get_video_url(url)
+                            if success:
+                                # ВАЖНО: Правильно обрабатываем новый формат данных
+                                if isinstance(video_info, dict):
+                                    # Если это данные от AnyDownloader API
+                                    if 'medias' in video_info and video_info['medias']:
+                                        logger.info("Используем данные AnyDownloader API для скачивания")
+                                        if await self.rednote.download_video(video_info, temp_path):
+                                            logger.info(f"✅ Успешная загрузка RedNote видео через AnyDownloader API (попытка {attempt+1})")
+                                            download_success = True
+                                            break
+                                    # Если это данные от XHSDownloader или старого API
+                                    elif 'video_url' in video_info:
+                                        video_url = video_info['video_url']
+                                        if await self.rednote.download_video(video_url, temp_path):
+                                            logger.info(f"✅ Успешная загрузка RedNote видео через XHSDownloader/старый API (попытка {attempt+1})")
+                                            download_success = True
+                                            break
+                                    else:
+                                        logger.warning(f"Неизвестный формат данных video_info: {video_info}")
+                                        error_messages.append(f"Неизвестный формат данных: {message}")
+                                else:
+                                    error_messages.append(f"Неверный тип данных video_info: {type(video_info)}")
+                                
+                                if attempt < max_attempts - 1:
+                                    wait_time = (attempt + 1) * 5
+                                    logger.info(f"Повторная попытка через {wait_time} секунд...")
+                                    await asyncio.sleep(wait_time)
+                                else:
+                                    error_messages.append(message)
+                                    download_success = False
+                            else:
+                                error_messages.append(message)
+                                if attempt < max_attempts - 1:
+                                    wait_time = (attempt + 1) * 5
+                                    logger.info(f"Повторная попытка через {wait_time} секунд...")
+                                    await asyncio.sleep(wait_time)
+                                else:
+                                    download_success = False
+                        except Exception as e:
+                            if attempt < max_attempts - 1:
+                                logger.warning(f"Попытка {attempt + 1} не удалась: {str(e)}")
+                                await asyncio.sleep(5)
+                            else:
+                                error_messages.append(f"Ошибка после {max_attempts} попыток: {str(e)}")
+                                download_success = False
+                except Exception as e:
+                    logger.warning(f"❌ Не удалось загрузить RedNote видео через RedNoteDownloader: {e}")
+                    error_messages.append(f"Ошибка RedNoteDownloader: {str(e)}")
+                    download_success = False
+                
+                # Метод 2: Через Cobalt, если RedNoteDownloader не сработал
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки RedNote видео через Cobalt API...")
+                        cobalt = CobaltDownloader()
+                        downloaded_path = await cobalt.download_video(url)
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            # Перемещаем файл в правильное место
+                            if downloaded_path != temp_path:
+                                import shutil
+                                shutil.move(downloaded_path, temp_path)
+                            logger.info(f"✅ Успешная загрузка RedNote видео через Cobalt API")
+                            download_success = True
+                        else:
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                            download_success = False
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить RedNote видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                        download_success = False
+                
+                # Метод 3: Через yt-dlp, если предыдущие методы не сработали
+                if not download_success:
+                    try:
+                        logger.info("Попытка загрузки RedNote видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка RedNote видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                            download_success = False
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить RedNote видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                        download_success = False
+                
+                # Если все методы не сработали
+                if not download_success:
+                    error_message = "Все методы загрузки RedNote видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+
             # ОБРАБОТКА INSTAGRAM
-            if service_type == 'instagram':
+            elif service_type == 'instagram':
                 # Метод 1: Наш новый метод скачивания Instagram
                 try:
                     from services.instagram_downloader import InstagramDownloader
@@ -367,11 +470,11 @@ class VideoHandler:
                         download_success = True
                     else:
                         error_messages.append("Не удалось загрузить через новый Instagram API метод")
-                        download_success = False  # Явно устанавливаем в False для безопасности
+                        download_success = False
                 except Exception as e:
                     logger.warning(f"❌ Не удалось загрузить Instagram видео через новый API метод: {e}")
                     error_messages.append(f"Ошибка нового Instagram API метода: {str(e)}")
-                    download_success = False  # Явно устанавливаем в False
+                    download_success = False
                 
                 # Метод 2: Через Cobalt, если новый метод не сработал
                 if not download_success:
@@ -411,82 +514,6 @@ class VideoHandler:
                 # Если все методы не сработали
                 if not download_success:
                     error_message = "Все методы загрузки Instagram видео не удались:\n" + "\n".join(error_messages)
-                    logger.error(error_message)
-                    raise Exception(error_message)
-            
-            # ОБРАБОТКА REDNOTE
-            elif service_type == 'rednote':
-                # Метод 1: Наш сервис RedNote
-                try:
-                    logger.info("Попытка загрузки RedNote видео через специализированный метод...")
-                    max_attempts = 3
-                    for attempt in range(max_attempts):
-                        try:
-                            success, message, video_info = await self.rednote.get_video_url(url)
-                            if success:
-                                video_url = video_info['video_url']
-                                if await self.rednote.download_video(video_url, temp_path):
-                                    logger.info(f"✅ Успешная загрузка RedNote видео через специализированный метод (попытка {attempt+1})")
-                                    download_success = True
-                                    break
-                            
-                            if attempt < max_attempts - 1:
-                                wait_time = (attempt + 1) * 5
-                                logger.info(f"Повторная попытка через {wait_time} секунд...")
-                                await asyncio.sleep(wait_time)
-                            else:
-                                error_messages.append(message)
-                                download_success = False
-                        except Exception as e:
-                            if attempt < max_attempts - 1:
-                                logger.warning(f"Попытка {attempt + 1} не удалась: {str(e)}")
-                                await asyncio.sleep(5)
-                            else:
-                                error_messages.append(f"Ошибка после {max_attempts} попыток: {str(e)}")
-                                download_success = False
-                except Exception as e:
-                    logger.warning(f"❌ Не удалось загрузить RedNote видео через специализированный метод: {e}")
-                    error_messages.append(f"Ошибка специализированного метода: {str(e)}")
-                    download_success = False
-                
-                # Метод 2: Через Cobalt, если специализированный метод не сработал
-                if not download_success:
-                    try:
-                        logger.info("Попытка загрузки RedNote видео через Cobalt API...")
-                        cobalt = CobaltDownloader()
-                        downloaded_path = await cobalt.download_video(url)
-                        if downloaded_path and os.path.exists(downloaded_path):
-                            os.rename(downloaded_path, temp_path)
-                            logger.info(f"✅ Успешная загрузка RedNote видео через Cobalt API")
-                            download_success = True
-                        else:
-                            error_messages.append("Файл не найден после загрузки через Cobalt")
-                            download_success = False
-                    except Exception as e:
-                        logger.warning(f"❌ Не удалось загрузить RedNote видео через Cobalt: {e}")
-                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
-                        download_success = False
-                
-                # Метод 3: Через yt-dlp, если предыдущие методы не сработали
-                if not download_success:
-                    try:
-                        logger.info("Попытка загрузки RedNote видео через yt-dlp...")
-                        await self._download_with_ytdlp(url, temp_path)
-                        
-                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                            logger.info(f"✅ Успешная загрузка RedNote видео через yt-dlp")
-                            download_success = True
-                        else:
-                            error_messages.append("yt-dlp загрузил пустой файл")
-                            download_success = False
-                    except Exception as e:
-                        logger.warning(f"❌ Не удалось загрузить RedNote видео через yt-dlp: {e}")
-                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
-                        download_success = False
-                
-                # Если все методы не сработали
-                if not download_success:
-                    error_message = "Все методы загрузки RedNote видео не удались:\n" + "\n".join(error_messages)
                     logger.error(error_message)
                     raise Exception(error_message)
                     
