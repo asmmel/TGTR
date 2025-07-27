@@ -19,7 +19,7 @@ class TTSService:
             "Accept": "audio/mpeg",
             "Content-Type": "application/json"
         }
-        proxy = "38.153.57.185:9145:JaHka2:V5q2XY"
+        proxy = "46.3.146.172:8000:X7Ed5Q:4EcCC5"
         # Настройка прокси
         self.proxy = proxy
         if self.proxy:
