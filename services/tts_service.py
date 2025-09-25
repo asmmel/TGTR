@@ -2,7 +2,7 @@ import aiohttp
 import logging
 from typing import Optional, Tuple
 from datetime import datetime
-from config.config import ELEVENLABS_API_KEY
+from config.config import ELEVENLABS_API_KEY, PROXY_TTS
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 class TTSService:
     def __init__(self, proxy: Optional[str] = None):
         self.api_key = ELEVENLABS_API_KEY
+        self.proxy = PROXY_TTS
         if not self.api_key:
             raise ValueError("ELEVENLABS_API_KEY не настроен")
             
@@ -19,9 +20,9 @@ class TTSService:
             "Accept": "audio/mpeg",
             "Content-Type": "application/json"
         }
-        proxy = "46.3.146.172:8000:X7Ed5Q:4EcCC5"
+        # proxy = "46.3.146.172:8000:X7Ed5Q:4EcCC5"
         # Настройка прокси
-        self.proxy = proxy
+        
         if self.proxy:
             proxy_parts = self.proxy.split(':')
             self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"

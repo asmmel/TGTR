@@ -8,7 +8,7 @@ import langdetect
 from typing import Dict, Optional, Tuple
 import aiohttp
 import asyncio
-from config.config import setup_logging, ELEVENLABS_API_KEY
+from config.config import setup_logging, ELEVENLABS_API_KEY, PROXY_TTS
 
 # Инициализируем логгер
 logger = setup_logging(__name__)
@@ -30,7 +30,7 @@ class VideoTranscriber:
         self.api_key = ELEVENLABS_API_KEY
         
         # Настройка прокси для ElevenLabs (если нужно)
-        self.proxy = os.environ.get('PROXY_TTS_1')
+        self.proxy = PROXY_TTS
         if self.proxy:
             proxy_parts = self.proxy.split(':')
             self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
