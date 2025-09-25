@@ -11,6 +11,7 @@ class TTSService:
     def __init__(self, proxy: Optional[str] = None):
         self.api_key = ELEVENLABS_API_KEY
         self.proxy = PROXY_TTS
+        
         if not self.api_key:
             raise ValueError("ELEVENLABS_API_KEY не настроен")
             
@@ -20,13 +21,22 @@ class TTSService:
             "Accept": "audio/mpeg",
             "Content-Type": "application/json"
         }
-        # proxy = "46.3.146.172:8000:X7Ed5Q:4EcCC5"
-        # Настройка прокси
         
-        if self.proxy:
-            proxy_parts = self.proxy.split(':')
-            self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-
+        # Безопасная настройка прокси
+        self.proxy_url = None
+        if self.proxy and self.proxy.strip():  # Проверяем, что прокси не пустой
+            try:
+                proxy_parts = self.proxy.split(':')
+                if len(proxy_parts) >= 4:
+                    self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+                    logger.info("TTS будет использовать прокси")
+                else:
+                    logger.warning("Неверный формат прокси для TTS, работаем напрямую")
+            except Exception as e:
+                logger.error(f"Ошибка настройки прокси для TTS: {e}")
+                logger.info("TTS будет работать без прокси")
+        else:
+            logger.info("TTS настроен для работы без прокси")
     async def text_to_speech(self, text: str, voice_config: dict) -> Tuple[Optional[bytes], Optional[str]]:
         """
         Асинхронное преобразование текста в речь

@@ -24,20 +24,30 @@ class VideoTranscriber:
         self.loaded_model = None
         self.current_lang = None
         
-        # Новый параметр: использовать ли ElevenLabs (по умолчанию False)
-        # Можно переключить в файле .env: USE_ELEVENLABS_TRANSCRIBER=true
+        # Новый параметр: использовать ли ElevenLabs
         self.use_elevenlabs = os.environ.get('USE_ELEVENLABS_TRANSCRIBER', 'false').lower() == 'true'
         self.api_key = ELEVENLABS_API_KEY
         
-        # Настройка прокси для ElevenLabs (если нужно)
+        # Безопасная настройка прокси для ElevenLabs
         self.proxy = PROXY_TTS
-        if self.proxy:
-            proxy_parts = self.proxy.split(':')
-            self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+        self.proxy_url = None
+        
+        if self.proxy and self.proxy.strip():  # Проверяем, что прокси не пустой
+            try:
+                proxy_parts = self.proxy.split(':')
+                if len(proxy_parts) >= 4:
+                    self.proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+                    logger.info("Транскрайбер настроен с прокси для ElevenLabs")
+                else:
+                    logger.warning("Неверный формат прокси для транскрайбера, работаем без прокси")
+            except Exception as e:
+                logger.error(f"Ошибка настройки прокси для транскрайбера: {e}")
+                logger.info("Транскрайбер будет работать без прокси")
         else:
-            self.proxy_url = None
+            logger.info("Транскрайбер настроен без прокси")
         
         logger.info(f"Транскрайбер инициализирован. Использование ElevenLabs: {self.use_elevenlabs}")
+
 
     def setup_logging(self):
         """Настройка логирования"""
@@ -114,6 +124,8 @@ class VideoTranscriber:
             file_size = os.path.getsize(wav_path)
             logger.info(f"Начинаем транскрибацию файла {wav_path} размером {file_size/1024/1024:.2f} MB через ElevenLabs")
             
+            
+            
             # Базовый URL для API ElevenLabs
             base_url = "https://api.elevenlabs.io/v1"
             
@@ -132,10 +144,14 @@ class VideoTranscriber:
                 "Accept": "application/json"
             }
             
+                        
             # Настройка сессии с прокси, если он указан
             session_kwargs = {"headers": headers}
             if self.proxy_url:
                 session_kwargs["proxy"] = self.proxy_url
+                logger.debug("Используется прокси для ElevenLabs транскрибации")
+            else:
+                logger.debug("Прямое подключение к ElevenLabs для транскрибации")
                 
             async with aiohttp.ClientSession(**session_kwargs) as session:
                 # Создаем форму для отправки файла
