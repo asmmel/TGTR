@@ -9,6 +9,8 @@ from typing import Optional, Dict, Tuple, Any
 from datetime import datetime
 from config.config import setup_logging
 from services.base_downloader import BaseDownloader
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 logger = setup_logging(__name__)
 
@@ -17,17 +19,53 @@ class InstagramDownloader(BaseDownloader):
     
     def __init__(self, downloads_dir="downloads"):
         super().__init__(downloads_dir)
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-        })
+        # Создаем отдельную сессию для каждого экземпляра
+        self.session = None
+        self._session_lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=2)
         logger.info("InstagramDownloader инициализирован")
+    
+    def _get_session(self):
+        """Получение или создание новой сессии с защитой от гонок"""
+        with self._session_lock:
+            if self.session is None or self.session.adapters is None:
+                if self.session:
+                    try:
+                        self.session.close()
+                    except:
+                        pass
+                
+                self.session = requests.Session()
+                self.session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+                })
+                
+                # Настройка адаптера с пулом соединений
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+                
+                retry_strategy = Retry(
+                    total=3,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                )
+                adapter = HTTPAdapter(
+                    max_retries=retry_strategy,
+                    pool_connections=1,
+                    pool_maxsize=1
+                )
+                
+                self.session.mount("http://", adapter)
+                self.session.mount("https://", adapter)
+                
+                logger.debug("Создана новая сессия Instagram")
+            
+            return self.session
     
     def extract_shortcode(self, url: str) -> Optional[str]:
         """Извлечение shortcode из URL Instagram"""
-        # Обновленные паттерны для различных форматов URL Instagram
         patterns = [
             r'/p/([A-Za-z0-9_-]+)/',     # Posts
             r'/reel/([A-Za-z0-9_-]+)/',  # Reels
@@ -43,9 +81,7 @@ class InstagramDownloader(BaseDownloader):
         return None
     
     async def get_instagram_params(self, shortcode: str) -> Dict[str, Any]:
-        """
-        УЛУЧШЕННАЯ версия get_instagram_params
-        """
+        """Получение параметров Instagram с изоляцией сессии"""
         try:
             post_url = f"https://www.instagram.com/reel/{shortcode}/"
             logger.debug(f"Получение параметров с: {post_url}")
@@ -59,15 +95,22 @@ class InstagramDownloader(BaseDownloader):
                 "Upgrade-Insecure-Requests": "1"
             }
             
-            # Используем синхронный запрос через executor для стабильности
+            # Используем ThreadPoolExecutor для изоляции запроса
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.session.get(post_url, headers=headers, timeout=30)
-            )
             
-            if response.status_code != 200:
-                logger.warning(f"Статус страницы: {response.status_code}")
+            def make_request():
+                session = self._get_session()
+                try:
+                    response = session.get(post_url, headers=headers, timeout=30)
+                    return response
+                except Exception as e:
+                    logger.error(f"Ошибка в make_request: {e}")
+                    return None
+            
+            response = await loop.run_in_executor(self.executor, make_request)
+            
+            if not response or response.status_code != 200:
+                logger.warning(f"Статус страницы: {response.status_code if response else 'None'}")
                 return {}
             
             content = response.text
@@ -94,31 +137,9 @@ class InstagramDownloader(BaseDownloader):
             logger.error(f"Ошибка при получении параметров: {e}")
             return {}
     
-    async def _make_request_async(self, method: str, url: str, **kwargs) -> Optional[str]:
-        """Асинхронная обертка для запросов"""
-        try:
-            loop = asyncio.get_event_loop()
-            if method.lower() == "get":
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: self.session.get(url, **kwargs)
-                )
-            else:
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: self.session.post(url, **kwargs)
-                )
-            
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logger.error(f"Ошибка при выполнении запроса: {e}")
-            return None
-    
     async def fetch_instagram_post(self, instagram_url: str) -> Tuple[Optional[Dict], Optional[str]]:
-        """
-        ИСПРАВЛЕННАЯ версия fetch_instagram_post
-        """
+        """Получение данных поста Instagram с изоляцией сессии"""
+        shortcode = None
         try:
             shortcode = self.extract_shortcode(instagram_url)
             
@@ -142,7 +163,7 @@ class InstagramDownloader(BaseDownloader):
             # URL для GraphQL
             url = "https://www.instagram.com/graphql/query"
             
-            # Параметры запроса (проверенные рабочие)
+            # Параметры запроса
             import random
             params = {
                 "av": "0",
@@ -163,7 +184,7 @@ class InstagramDownloader(BaseDownloader):
                     "hoisted_reply_id": None
                 }),
                 "server_timestamps": "true",
-                "doc_id": "8845758582119845",  # Рабочий doc_id
+                "doc_id": "8845758582119845",
             }
             
             # Добавляем динамические параметры если есть
@@ -193,63 +214,67 @@ class InstagramDownloader(BaseDownloader):
             
             logger.info("Выполнение запроса к Instagram GraphQL API...")
             
-            try:
-                # Выполняем POST-запрос
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: self.session.post(url, data=params, headers=headers, timeout=30)
-                )
+            def make_graphql_request():
+                session = self._get_session()
+                try:
+                    response = session.post(url, data=params, headers=headers, timeout=30)
+                    return response
+                except Exception as e:
+                    logger.error(f"Ошибка в make_graphql_request: {e}")
+                    return None
+            
+            # Выполняем POST-запрос через ThreadPoolExecutor
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(self.executor, make_graphql_request)
+            
+            if not response:
+                logger.error("Не удалось выполнить запрос")
+                return None, None
                 
-                logger.info(f"Ответ сервера: {response.status_code}")
-                
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
+            logger.info(f"Ответ сервера: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    
+                    # Проверяем наличие данных
+                    if 'data' in data and data['data']:
+                        logger.info("JSON успешно получен и содержит данные")
                         
-                        # Проверяем наличие данных
-                        if 'data' in data and data['data']:
-                            logger.info("JSON успешно получен и содержит данные")
-                            
-                            # Сохраняем для отладки
-                            if os.environ.get('DEBUG_INSTAGRAM', '').lower() == 'true':
-                                import time
-                                filename = f"debug_instagram_{shortcode}_{int(time.time())}.json"
-                                with open(filename, "w", encoding="utf-8") as f:
-                                    json.dump(data, f, indent=2, ensure_ascii=False)
-                                logger.info(f"Debug данные сохранены в: {filename}")
-                            
-                            return data, shortcode
-                            
-                        elif 'errors' in data:
-                            logger.error(f"GraphQL ошибки: {data['errors']}")
-                            return None, None
-                            
-                        else:
-                            logger.warning("Ответ не содержит данных или ошибок")
-                            logger.warning(f"Ключи ответа: {list(data.keys())}")
-                            return None, None
-                            
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Ошибка парсинга JSON: {e}")
-                        logger.error(f"Ответ сервера: {response.text[:200]}...")
+                        # Сохраняем для отладки при необходимости
+                        if os.environ.get('DEBUG_INSTAGRAM', '').lower() == 'true':
+                            filename = f"debug_instagram_{shortcode}_{int(time.time())}.json"
+                            with open(filename, "w", encoding="utf-8") as f:
+                                json.dump(data, f, indent=2, ensure_ascii=False)
+                            logger.info(f"Debug данные сохранены в: {filename}")
+                        
+                        return data, shortcode
+                        
+                    elif 'errors' in data:
+                        logger.error(f"GraphQL ошибки: {data['errors']}")
                         return None, None
+                        
+                    else:
+                        logger.warning("Ответ не содержит данных или ошибок")
+                        logger.warning(f"Ключи ответа: {list(data.keys())}")
+                        return None, None
+                        
+                except json.JSONDecodeError as e:
+                    logger.error(f"Ошибка парсинга JSON: {e}")
+                    logger.error(f"Ответ сервера: {response.text[:200]}...")
+                    return None, None
+            
+            elif response.status_code == 429:
+                logger.warning("Rate limit обнаружен")
+                return None, None
                 
-                elif response.status_code == 429:
-                    logger.warning("Rate limit обнаружен")
-                    return None, None
-                    
-                elif response.status_code == 403:
-                    logger.warning("Доступ запрещен (403)")
-                    return None, None
-                    
-                else:
-                    logger.error(f"HTTP ошибка: {response.status_code}")
-                    logger.error(f"Ответ: {response.text[:100]}...")
-                    return None, None
-                    
-            except Exception as request_error:
-                logger.error(f"Ошибка выполнения запроса: {request_error}")
+            elif response.status_code == 403:
+                logger.warning("Доступ запрещен (403)")
+                return None, None
+                
+            else:
+                logger.error(f"HTTP ошибка: {response.status_code}")
+                logger.error(f"Ответ: {response.text[:100]}...")
                 return None, None
                 
         except Exception as e:
@@ -257,19 +282,10 @@ class InstagramDownloader(BaseDownloader):
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None, None
-
-
-
-
-
     
     def extract_video_url(self, json_data: dict) -> Optional[str]:
-        """
-        ИСПРАВЛЕННАЯ версия extract_video_url
-        Правильно обрабатывает формат xdt_shortcode_media
-        """
+        """Извлечение URL видео из JSON данных"""
         try:
-            # Логируем для отладки
             logger.debug(f"Анализ JSON структуры: {list(json_data.keys())}")
             
             media = None
@@ -278,7 +294,7 @@ class InstagramDownloader(BaseDownloader):
                 data_keys = list(json_data['data'].keys())
                 logger.debug(f"Ключи в data: {data_keys}")
                 
-                # ВАЖНО: Сначала проверяем НОВЫЙ формат xdt_shortcode_media
+                # Проверяем новый формат xdt_shortcode_media
                 if 'xdt_shortcode_media' in json_data['data']:
                     media = json_data['data']['xdt_shortcode_media']
                     logger.info("✅ Найден новый формат: xdt_shortcode_media")
@@ -304,8 +320,8 @@ class InstagramDownloader(BaseDownloader):
             is_video = media.get('is_video', False)
             logger.info(f"📱 Тип медиа: {media_type}, Это видео: {is_video}")
             
-            # Проверяем что это видео (поддержка новых типов)
-            video_types = ['GraphVideo', 'XDTGraphVideo']  # XDTGraphVideo - новый тип!
+            # Проверяем что это видео
+            video_types = ['GraphVideo', 'XDTGraphVideo']
             
             if media_type in video_types or is_video:
                 logger.info("✅ Подтвержден тип видео")
@@ -316,10 +332,8 @@ class InstagramDownloader(BaseDownloader):
                     if video_url and isinstance(video_url, str):
                         logger.info(f"🎯 Найден прямой video_url: {video_url[:100]}...")
                         return video_url
-                    else:
-                        logger.warning("⚠️ video_url найден, но пустой или неверного типа")
                 
-                # Поиск в video_resources (если прямого нет)
+                # Поиск в video_resources
                 if 'video_resources' in media and media['video_resources']:
                     logger.info(f"🔍 Поиск в video_resources ({len(media['video_resources'])} элементов)")
                     video_resources = media['video_resources']
@@ -334,35 +348,29 @@ class InstagramDownloader(BaseDownloader):
                     if video_url:
                         logger.info(f"🎯 Найден video_url в video_resources: {video_url[:100]}...")
                         return video_url
-                
-                logger.warning("⚠️ video_url не найден в стандартных местах")
             
-            # Обработка каруселей (для постов с несколькими видео)
+            # Обработка каруселей
             elif media_type in ['GraphSidecar', 'XDTGraphSidecar']:
                 logger.info("🎠 Обработка карусели")
                 edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
                 
                 for i, edge in enumerate(edges):
                     node = edge.get('node', {})
-                    logger.debug(f"Элемент карусели {i+1}: {node.get('__typename', 'Unknown')}, is_video: {node.get('is_video', False)}")
-                    
                     if node.get('is_video', False):
                         video_url = node.get('video_url')
                         if video_url:
                             logger.info(f"🎯 Найден video_url в карусели: {video_url[:100]}...")
                             return video_url
             
-            # ПОСЛЕДНИЙ ШАНС: Рекурсивный поиск по всему JSON
+            # Рекурсивный поиск
             logger.warning("🔍 Выполняется рекурсивный поиск video_url...")
             
             def find_video_url_recursive(obj, path=""):
                 if isinstance(obj, dict):
-                    # Прямой поиск video_url
                     if "video_url" in obj and isinstance(obj["video_url"], str):
                         logger.info(f"🎯 Рекурсивно найден video_url в {path}")
                         return obj["video_url"]
                     
-                    # Рекурсивный поиск в подобъектах
                     for key, value in obj.items():
                         result = find_video_url_recursive(value, f"{path}.{key}" if path else key)
                         if result:
@@ -381,20 +389,7 @@ class InstagramDownloader(BaseDownloader):
                 logger.info(f"🎯 Найден video_url рекурсивным поиском: {video_url[:100]}...")
                 return video_url
             
-            # Если ничего не найдено - детальное логирование для отладки
             logger.error("❌ video_url не найден нигде!")
-            logger.error(f"Доступные ключи в media: {list(media.keys())[:20]}")
-            
-            # Ищем любые ключи со словом 'video'
-            video_keys = [k for k in media.keys() if 'video' in k.lower()]
-            if video_keys:
-                logger.error(f"Найдены ключи с 'video': {video_keys}")
-            
-            # Ищем любые ключи со словом 'url'
-            url_keys = [k for k in media.keys() if 'url' in k.lower()]
-            if url_keys:
-                logger.error(f"Найдены ключи с 'url': {url_keys}")
-            
             return None
                     
         except Exception as e:
@@ -404,7 +399,7 @@ class InstagramDownloader(BaseDownloader):
             return None
     
     async def download_video_new_method(self, url: str, output_path: str) -> bool:
-        """Загрузка видео с URL и сохранение в файл"""
+        """Загрузка видео с URL с изоляцией сессии"""
         try:
             logger.info(f"Загрузка видео с: {url}")
             
@@ -421,40 +416,45 @@ class InstagramDownloader(BaseDownloader):
             # Создаем директорию, если не существует
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Выполняем запрос
+            def download_file():
+                session = self._get_session()
+                try:
+                    response = session.get(url, headers=headers, stream=True, timeout=60)
+                    response.raise_for_status()
+                    
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded_size = 0
+                    
+                    logger.info(f"Сохранение в: {output_path}")
+                    if total_size > 0:
+                        logger.info(f"Размер файла: {total_size / (1024*1024):.2f} MB")
+                    
+                    with open(output_path, 'wb') as file:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                file.write(chunk)
+                                downloaded_size += len(chunk)
+                                
+                                # Показываем прогресс
+                                if total_size > 0:
+                                    progress = (downloaded_size / total_size) * 100
+                                    if downloaded_size % (1024*1024) == 0:  # Каждый MB
+                                        logger.debug(f"Прогресс: {progress:.1f}% ({downloaded_size / (1024*1024):.2f} MB)")
+                    
+                    logger.info(f"Видео загружено успешно: {output_path}")
+                    logger.info(f"Итоговый размер: {downloaded_size / (1024*1024):.2f} MB")
+                    
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка в download_file: {e}")
+                    return False
+            
+            # Выполняем загрузку через ThreadPoolExecutor
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.session.get(url, headers=headers, stream=True, timeout=60)
-            )
+            result = await loop.run_in_executor(self.executor, download_file)
             
-            response.raise_for_status()
-            
-            # Получаем размер файла
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded_size = 0
-            
-            logger.info(f"Сохранение в: {output_path}")
-            if total_size > 0:
-                logger.info(f"Размер файла: {total_size / (1024*1024):.2f} MB")
-            
-            # Загружаем файл по частям
-            with open(output_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        file.write(chunk)
-                        downloaded_size += len(chunk)
-                        
-                        # Показываем прогресс
-                        if total_size > 0:
-                            progress = (downloaded_size / total_size) * 100
-                            if downloaded_size % (1024*1024) == 0:  # Каждый MB
-                                logger.debug(f"Прогресс: {progress:.1f}% ({downloaded_size / (1024*1024):.2f} MB)")
-            
-            logger.info(f"Видео загружено успешно: {output_path}")
-            logger.info(f"Итоговый размер: {downloaded_size / (1024*1024):.2f} MB")
-            
-            return True
+            return result
             
         except Exception as e:
             logger.error(f"Ошибка при загрузке видео: {e}")
@@ -502,7 +502,7 @@ class InstagramDownloader(BaseDownloader):
             return {}
     
     async def download_video(self, url: str, output_path: str = None) -> Optional[str]:
-        """Главный метод загрузки видео из Instagram"""
+        """Главный метод загрузки видео из Instagram с улучшенной изоляцией"""
         if not output_path:
             output_path = self.generate_output_filename("instagram")
         
@@ -588,3 +588,31 @@ class InstagramDownloader(BaseDownloader):
                     pass
             
             return None
+        finally:
+            # Принудительно очищаем ресурсы
+            await self.cleanup()
+    
+    async def cleanup(self):
+        """Очистка ресурсов"""
+        try:
+            with self._session_lock:
+                if self.session:
+                    try:
+                        self.session.close()
+                    except:
+                        pass
+                    finally:
+                        self.session = None
+            logger.debug("Ресурсы InstagramDownloader очищены")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке ресурсов: {e}")
+    
+    def __del__(self):
+        """Деструктор для очистки ресурсов"""
+        try:
+            if hasattr(self, 'session') and self.session:
+                self.session.close()
+            if hasattr(self, 'executor') and self.executor:
+                self.executor.shutdown(wait=False)
+        except:
+            pass

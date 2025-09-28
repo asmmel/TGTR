@@ -40,6 +40,9 @@ import os
 from os import path
 import math
 
+import weakref
+from typing import Dict, Set, Any
+import gc
 
 from config.config import setup_logging
 from config.config import ELEVENLABS_VOICES, API_ID, API_HASH
@@ -58,7 +61,7 @@ class VideoHandler:
         self.db = Database()
         self.audio_handler = AudioHandler()
         self.downloads_dir = "downloads"  # Для скачанных видео
-        self.active_users = set()
+        
         self.file_registry = {}
         self.bot = None  # Будет установлен позже
         self.session = None
@@ -69,6 +72,22 @@ class VideoHandler:
         self.local_api_url = "http://localhost:8081"  # URL локального сервера
         self.api_endpoint = f"{self.local_api_url}/bot{BOT_TOKEN}"
         self.session = None
+
+
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Замена на обычный set с таймаутом
+        self.active_users: Set[int] = set()
+        self.user_timeouts: Dict[int, float] = {}  # user_id -> timestamp
+        self.user_timeout_duration = 300  # 5 минут таймаут
+        
+        # Кэш загрузчиков с автоочисткой
+        self._downloader_cache: Dict[str, Any] = {}
+        self._cache_cleanup_interval = 300  # 5 минут
+        
+        # Семафор для ограничения одновременных загрузок
+        self._download_semaphore = asyncio.Semaphore(3)
+        
+        # Запускаем фоновую очистку
+        asyncio.create_task(self._background_cleanup())
         
         # Настройки клиента
         self.app = None
@@ -97,6 +116,213 @@ class VideoHandler:
         if self.connector:
             await self.connector.close()
             self.connector = None
+
+    def add_active_user(self, user_id: int) -> bool:
+        """Добавление пользователя в активные с проверкой таймаута"""
+        current_time = time.time()
+        
+        # Очищаем устаревшие записи
+        self._cleanup_expired_users(current_time)
+        
+        if user_id in self.active_users:
+            # Проверяем, не истек ли таймаут
+            if user_id in self.user_timeouts:
+                if current_time - self.user_timeouts[user_id] < self.user_timeout_duration:
+                    return False  # Пользователь все еще активен
+                else:
+                    # Таймаут истек, удаляем и добавляем заново
+                    self.remove_active_user(user_id)
+        
+        self.active_users.add(user_id)
+        self.user_timeouts[user_id] = current_time
+        return True
+    
+    def remove_active_user(self, user_id: int):
+        """Удаление пользователя из активных"""
+        self.active_users.discard(user_id)
+        self.user_timeouts.pop(user_id, None)
+    
+    def _cleanup_expired_users(self, current_time: float):
+        """Очистка пользователей с истекшим таймаутом"""
+        expired_users = [
+            user_id for user_id, timestamp in self.user_timeouts.items()
+            if current_time - timestamp > self.user_timeout_duration
+        ]
+        
+        for user_id in expired_users:
+            self.remove_active_user(user_id)
+    
+    async def _background_cleanup(self):
+        """Фоновая очистка ресурсов каждые 5 минут"""
+        while True:
+            try:
+                await asyncio.sleep(self._cache_cleanup_interval)
+                current_time = time.time()
+                self._cleanup_expired_users(current_time)
+                await self._cleanup_downloaders()
+                gc.collect()  # Принудительная сборка мусора
+                logger.debug(f"Выполнена фоновая очистка. Активных пользователей: {len(self.active_users)}")
+            except Exception as e:
+                logger.error(f"Ошибка в фоновой очистке: {e}")
+    
+    async def _cleanup_downloaders(self):
+        """Очистка кэша загрузчиков"""
+        try:
+            for service_type, downloader in list(self._downloader_cache.items()):
+                if hasattr(downloader, 'cleanup'):
+                    await downloader.cleanup()
+                del self._downloader_cache[service_type]
+            logger.debug("Кэш загрузчиков очищен")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке загрузчиков: {e}")
+
+    def _get_or_create_downloader(self, service_type: str) -> Any:
+        """Получение или создание загрузчика с кэшированием"""
+        if service_type not in self._downloader_cache:
+            if service_type == 'instagram':
+                from services.instagram_downloader import InstagramDownloader
+                self._downloader_cache[service_type] = InstagramDownloader(self.downloads_dir)
+            elif service_type == 'kuaishou':
+                from services.kuaishou import KuaishouDownloader
+                self._downloader_cache[service_type] = KuaishouDownloader()
+            elif service_type == 'rednote':
+                from services.rednote import RedNoteDownloader
+                self._downloader_cache[service_type] = RedNoteDownloader()
+            else:
+                # Fallback загрузчик
+                from services.youtube_downloader import YouTubeDownloader
+                self._downloader_cache[service_type] = YouTubeDownloader(self.downloads_dir)
+        
+        return self._downloader_cache[service_type]
+    
+    async def download_video(self, url: str, service_type: str) -> str:
+        """ИСПРАВЛЕННЫЙ метод загрузки видео с семафором и правильным управлением ресурсами"""
+        async with self._download_semaphore:  # Ограничиваем количество одновременных загрузок
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_name = f"temp_{service_type}_{timestamp}"
+            final_name = f"{service_type}_{timestamp}"
+            
+            temp_path = os.path.join(self.downloads_dir, f"{temp_name}.mp4")
+            final_path = os.path.join(self.downloads_dir, f"{final_name}.mp4")
+            
+            download_success = False
+            error_messages = []
+            downloader = None
+            
+            try:
+                logger.info(f"Начинаем загрузку {service_type} видео: {url}")
+                
+                if service_type == 'instagram':
+                    # Метод 1: Через специализированный загрузчик
+                    try:
+                        logger.info("Попытка загрузки Instagram видео через специализированный API...")
+                        downloader = self._get_or_create_downloader('instagram')
+                        result_path = await downloader.download_video(url, temp_path)
+                        
+                        if result_path and os.path.exists(result_path):
+                            if result_path != temp_path and os.path.exists(result_path):
+                                import shutil
+                                shutil.copy2(result_path, temp_path)
+                                # Удаляем оригинал если он отличается
+                                try:
+                                    if result_path != temp_path:
+                                        os.remove(result_path)
+                                except:
+                                    pass
+                            logger.info(f"✅ Успешная загрузка Instagram видео через специализированный API")
+                            download_success = True
+                        else:
+                            error_messages.append("Специализированный Instagram API не смог загрузить видео")
+                            
+                    except Exception as e:
+                        logger.warning(f"❌ Ошибка специализированного Instagram API: {e}")
+                        error_messages.append(f"Ошибка Instagram API: {str(e)}")
+                    finally:
+                        # Очищаем ресурсы загрузчика
+                        if downloader and hasattr(downloader, 'cleanup'):
+                            try:
+                                await downloader.cleanup()
+                            except:
+                                pass
+                
+                # Метод 2: Через Cobalt (резервный для всех сервисов)
+                if not download_success:
+                    try:
+                        logger.info(f"Попытка загрузки {service_type} видео через Cobalt API...")
+                        from services.cobalt import CobaltDownloader
+                        cobalt = CobaltDownloader()
+                        downloaded_path = await cobalt.download_video(url)
+                        
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            if downloaded_path != temp_path:
+                                import shutil
+                                shutil.copy2(downloaded_path, temp_path)
+                                # Удаляем оригинал Cobalt файл
+                                try:
+                                    os.remove(downloaded_path)
+                                except:
+                                    pass
+                            logger.info(f"✅ Успешная загрузка {service_type} видео через Cobalt API")
+                            download_success = True
+                        else:
+                            error_messages.append("Файл не найден после загрузки через Cobalt")
+                            
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить {service_type} видео через Cobalt: {e}")
+                        error_messages.append(f"Ошибка Cobalt: {str(e)}")
+                
+                # Метод 3: Через yt-dlp (последний резерв)
+                if not download_success:
+                    try:
+                        logger.info(f"Попытка загрузки {service_type} видео через yt-dlp...")
+                        await self._download_with_ytdlp(url, temp_path)
+                        
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            logger.info(f"✅ Успешная загрузка {service_type} видео через yt-dlp")
+                            download_success = True
+                        else:
+                            error_messages.append("yt-dlp загрузил пустой файл")
+                            
+                    except Exception as e:
+                        logger.warning(f"❌ Не удалось загрузить {service_type} видео через yt-dlp: {e}")
+                        error_messages.append(f"Ошибка yt-dlp: {str(e)}")
+                
+                # Проверяем результат
+                if not download_success or not os.path.exists(temp_path):
+                    error_message = f"Все методы загрузки {service_type} видео не удались:\n" + "\n".join(error_messages)
+                    logger.error(error_message)
+                    raise Exception(error_message)
+                
+                # Проверяем размер файла
+                file_size = os.path.getsize(temp_path)
+                if file_size == 0:
+                    raise Exception("Загружен пустой файл (0 байт)")
+                
+                # Перемещаем файл в конечный путь
+                os.rename(temp_path, final_path)
+                logger.info(f"✅ Видео успешно загружено: {final_path} (размер: {file_size/1024/1024:.2f} МБ)")
+                return final_path
+                
+            except Exception as e:
+                logger.error(f"❌ Критическая ошибка при загрузке видео: {str(e)}")
+                # Очищаем временные файлы
+                for path in [temp_path, final_path]:
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                            logger.debug(f"Удален временный файл: {path}")
+                        except Exception as clean_error:
+                            logger.error(f"Ошибка при удалении файла {path}: {clean_error}")
+                raise
+            finally:
+                # Принудительная очистка
+                if downloader and hasattr(downloader, 'cleanup'):
+                    try:
+                        await downloader.cleanup()
+                    except:
+                        pass
+
+    
 
     # async def set_bot(self, bot):
     #     """Установка экземпляра бота и инициализация путей"""
@@ -788,15 +1014,15 @@ class VideoHandler:
             return []
 
     async def process_url(self, message: types.Message, state: FSMContext):
-        """Обработка URL видео"""
+        """ИСПРАВЛЕННЫЙ метод обработки URL с правильным управлением состоянием"""
         logger.info(f"Получен URL для обработки: {message.text}")
         user_id = message.from_user.id
         
-        if user_id in self.active_users:
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем новый метод проверки активности
+        if not self.add_active_user(user_id):
             await message.reply("⏳ Пожалуйста, дождитесь окончания обработки предыдущего запроса")
             return
-            
-        self.active_users.add(user_id)
+        
         video_path = None
         status_message = None
         
@@ -841,7 +1067,7 @@ class VideoHandler:
             self.db.log_url(
                 user_id=message.from_user.id,
                 username=message.from_user.username,
-                url=url_to_process,  # Логируем очищенный URL
+                url=url_to_process,
                 status="success"
             )
 
@@ -861,7 +1087,8 @@ class VideoHandler:
                     logger.error(f"Ошибка при очистке файла {video_path}: {clean_error}")
                         
         finally:
-            self.active_users.discard(user_id)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Всегда удаляем пользователя из активных
+            self.remove_active_user(user_id)
 
     async def _process_chinese_transcription(self, message: types.Message, state: FSMContext, status_message: types.Message):
         """Обработка китайской транскрипции"""
@@ -1470,17 +1697,17 @@ class VideoHandler:
             self.active_users.discard(user_id)
 
     async def handle_action_selection(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработка выбора действия"""
+        """ИСПРАВЛЕННЫЙ метод выбора действия с улучшенным управлением ресурсами"""
         message_with_buttons = callback_query.message
         user_id = callback_query.from_user.id
         file_id = None
         
         try:
-            if user_id in self.active_users:
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем активность пользователя по-новому
+            if not self.add_active_user(user_id):
                 await callback_query.answer("⏳ Дождитесь окончания обработки")
                 return
                             
-            self.active_users.add(user_id)
             await callback_query.answer()
             
             # Инициализируем клиент, если еще не инициализирован
@@ -1533,7 +1760,7 @@ class VideoHandler:
                     
                     # Успешная отправка - удаляем сообщение с прогрессом
                     await progress_message.edit_text("✅ Видео успешно отправлено!")
-                    await asyncio.sleep(1)  # Даем пользователю увидеть сообщение
+                    await asyncio.sleep(1)
                     await progress_message.delete()
                     
                 except Exception as e:
@@ -1546,7 +1773,6 @@ class VideoHandler:
             
                 await message_with_buttons.edit_text("🎵 Извлекаю аудио из видео...")
                 
-                # Не удаляем wav_path если он существует, он может понадобиться
                 success = await self.transcriber.extract_audio(video_path, wav_path)
                 
                 if not success:
@@ -1585,11 +1811,12 @@ class VideoHandler:
                 await message_with_buttons.edit_text(error_msg)
                     
         finally:
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно удаляем пользователя из активных
+            self.remove_active_user(user_id)
+            
             # Очищаем файлы только если это была операция download
             if action == 'download' and file_id:
                 await self.cleanup_files(file_id)
-                
-            self.active_users.discard(user_id)
 
     async def _upload_progress(self, current, total, message):
         """Обновление прогресса отправки"""
