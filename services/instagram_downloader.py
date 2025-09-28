@@ -43,13 +43,15 @@ class InstagramDownloader(BaseDownloader):
         return None
     
     async def get_instagram_params(self, shortcode: str) -> Dict[str, Any]:
-        """Получение динамических параметров со страницы Instagram"""
+        """
+        УЛУЧШЕННАЯ версия get_instagram_params
+        """
         try:
             post_url = f"https://www.instagram.com/reel/{shortcode}/"
-            logger.info(f"Получение параметров с: {post_url}")
+            logger.debug(f"Получение параметров с: {post_url}")
             
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
@@ -57,37 +59,34 @@ class InstagramDownloader(BaseDownloader):
                 "Upgrade-Insecure-Requests": "1"
             }
             
-            response = await self._make_request_async("get", post_url, headers=headers)
+            # Используем синхронный запрос через executor для стабильности
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.session.get(post_url, headers=headers, timeout=30)
+            )
             
-            if not response:
-                logger.error("Ошибка при получении HTML-страницы")
+            if response.status_code != 200:
+                logger.warning(f"Статус страницы: {response.status_code}")
                 return {}
             
+            content = response.text
             params = {}
             
-            # Извлекаем токен LSD
-            lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"', response)
-            if lsd_match:
-                params["lsd"] = lsd_match.group(1)
-                logger.debug(f"Найден токен LSD: {params['lsd']}")
+            # Извлекаем различные токены
+            token_patterns = {
+                "lsd": r'"LSD",\[\],\{"token":"([^"]+)"',
+                "jazoest": r'"jazoest":"([^"]+)"',
+                "csrf_token": r'"csrf_token":"([^"]+)"',
+                "__spin_r": r'"__spin_r":(\d+)',
+                "__hsi": r'"hsi":"(\d+)"',
+            }
             
-            # Извлекаем jazoest
-            jazoest_match = re.search(r'"jazoest":"([^"]+)"', response)
-            if jazoest_match:
-                params["jazoest"] = jazoest_match.group(1)
-                logger.debug(f"Найден jazoest: {params['jazoest']}")
-            
-            # Извлекаем __spin_r (revision)
-            spin_r_match = re.search(r'"__spin_r":(\d+)', response)
-            if spin_r_match:
-                params["__spin_r"] = spin_r_match.group(1)
-                logger.debug(f"Найден __spin_r: {params['__spin_r']}")
-            
-            # Извлекаем __hsi
-            hsi_match = re.search(r'"hsi":"(\d+)"', response)
-            if hsi_match:
-                params["__hsi"] = hsi_match.group(1)
-                logger.debug(f"Найден __hsi: {params['__hsi']}")
+            for key, pattern in token_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    params[key] = match.group(1)
+                    logger.debug(f"Найден {key}: {match.group(1)[:20]}...")
             
             return params
             
@@ -117,7 +116,9 @@ class InstagramDownloader(BaseDownloader):
             return None
     
     async def fetch_instagram_post(self, instagram_url: str) -> Tuple[Optional[Dict], Optional[str]]:
-        """Получение данных поста из Instagram GraphQL API"""
+        """
+        ИСПРАВЛЕННАЯ версия fetch_instagram_post
+        """
         try:
             shortcode = self.extract_shortcode(instagram_url)
             
@@ -127,19 +128,29 @@ class InstagramDownloader(BaseDownloader):
             
             logger.info(f"Извлечен shortcode: {shortcode}")
             
-            current_timestamp = int(time.time())
-            dynamic_params = await self.get_instagram_params(shortcode)
+            # Минимальная задержка
+            await asyncio.sleep(1)
             
+            # Получаем динамические параметры
+            try:
+                dynamic_params = await self.get_instagram_params(shortcode)
+                logger.info(f"Получены динамические параметры: {list(dynamic_params.keys())}")
+            except Exception as e:
+                logger.warning(f"Ошибка получения параметров: {e}. Используем базовые.")
+                dynamic_params = {}
+            
+            # URL для GraphQL
             url = "https://www.instagram.com/graphql/query"
             
-            # Базовые параметры
+            # Параметры запроса (проверенные рабочие)
+            import random
             params = {
                 "av": "0",
                 "__d": "www",
-                "__user": "0",
+                "__user": "0", 
                 "__a": "1",
-                "__req": "b",
-                "dpr": "1",
+                "__req": str(random.randint(1, 50)),
+                "dpr": "2",
                 "__ccg": "UNKNOWN",
                 "__comet_req": "7",
                 "__spin_b": "trunk",
@@ -152,152 +163,244 @@ class InstagramDownloader(BaseDownloader):
                     "hoisted_reply_id": None
                 }),
                 "server_timestamps": "true",
-                "doc_id": "8845758582119845"
+                "doc_id": "8845758582119845",  # Рабочий doc_id
             }
             
-            # Динамические параметры
-            time_sensitive_params = {
-                "__hs": "20158.HYP:instagram_web_pkg.2.1...0",
-                "__rev": "1020782089",
-                "__s": "3q1x7r:b7bkvx:frscxl",
-                "__hsi": "7480634687841513346",
-                "__dyn": "7xeUjG1mxu1syUbFp41twpUnwgU7SbzEdF8aUco2qwJw5ux609vCwjE1EE2Cw8G11wBz81s8hwGxu786a3a1YwBgao6C0Mo2swtUd8-U2zxe2GewGw9a361qw8Xxm16wa-0raazo7u3C2u2J0bS1LwTwKG1pg2fwxyo6O1FwlEcUed6goK2O4UrAwHxW1oxe17wciubBKu9w",
-                "__csr": "g9i2cnbVbXlkBcHyVd9QVb-hQACDXGA_le4-haGA_UZ3XAGm8IyKXLAFXhlEyxaRydqSuBz8HAV4ay95RAxmppfz9lKZ2V9o-eGFohyryK9yUB9KEGpacKq8nx2XzHpoG49ERzoK5orx66U8E01fAo9ERwq8Ehob8dU4y4QcgoEJ09qui0IoVwyGE5G1IwVw8u0gi0q-058o0Gx1C488C0gm0luhUr5BgCl0aOmfw4Dxf84o15Fx832zFqg46lo07wG0tO06fU",
-                "__hsdp": "",
-                "__hblp": "",
-                "lsd": "AVoXppBilIg",
-                "jazoest": "21029",
-                "__spin_r": "1020782089",
-                "__spin_t": str(current_timestamp),
-            }
+            # Добавляем динамические параметры если есть
+            if dynamic_params:
+                params.update(dynamic_params)
             
-            # Объединяем параметры
-            all_params = {**params, **time_sensitive_params, **dynamic_params}
-            
+            # Заголовки
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Origin": "https://www.instagram.com",
                 "Referer": f"https://www.instagram.com/reel/{shortcode}/",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "X-CSRFToken": dynamic_params.get('lsd', ''),
                 "X-Instagram-AJAX": "1",
-                "X-Requested-With": "XMLHttpRequest"
+                "X-Requested-With": "XMLHttpRequest",
             }
+            
+            # Добавляем CSRF токен если есть
+            if 'lsd' in dynamic_params:
+                headers["X-CSRFToken"] = dynamic_params['lsd']
+            elif 'csrf_token' in dynamic_params:
+                headers["X-CSRFToken"] = dynamic_params['csrf_token']
             
             logger.info("Выполнение запроса к Instagram GraphQL API...")
             
-            # Выполняем POST-запрос
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.session.post(url, data=all_params, headers=headers, timeout=30)
-            )
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # Сохраняем для отладки если включен DEBUG режим
-            if os.environ.get('DEBUG_INSTAGRAM', '').lower() == 'true':
-                filename = f"instagram_post_{shortcode}.json"
-                with open(filename, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                logger.debug(f"Ответ сохранен в {filename}")
-            
-            return data, shortcode
-            
+            try:
+                # Выполняем POST-запрос
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.session.post(url, data=params, headers=headers, timeout=30)
+                )
+                
+                logger.info(f"Ответ сервера: {response.status_code}")
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        
+                        # Проверяем наличие данных
+                        if 'data' in data and data['data']:
+                            logger.info("JSON успешно получен и содержит данные")
+                            
+                            # Сохраняем для отладки
+                            if os.environ.get('DEBUG_INSTAGRAM', '').lower() == 'true':
+                                import time
+                                filename = f"debug_instagram_{shortcode}_{int(time.time())}.json"
+                                with open(filename, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2, ensure_ascii=False)
+                                logger.info(f"Debug данные сохранены в: {filename}")
+                            
+                            return data, shortcode
+                            
+                        elif 'errors' in data:
+                            logger.error(f"GraphQL ошибки: {data['errors']}")
+                            return None, None
+                            
+                        else:
+                            logger.warning("Ответ не содержит данных или ошибок")
+                            logger.warning(f"Ключи ответа: {list(data.keys())}")
+                            return None, None
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Ошибка парсинга JSON: {e}")
+                        logger.error(f"Ответ сервера: {response.text[:200]}...")
+                        return None, None
+                
+                elif response.status_code == 429:
+                    logger.warning("Rate limit обнаружен")
+                    return None, None
+                    
+                elif response.status_code == 403:
+                    logger.warning("Доступ запрещен (403)")
+                    return None, None
+                    
+                else:
+                    logger.error(f"HTTP ошибка: {response.status_code}")
+                    logger.error(f"Ответ: {response.text[:100]}...")
+                    return None, None
+                    
+            except Exception as request_error:
+                logger.error(f"Ошибка выполнения запроса: {request_error}")
+                return None, None
+                
         except Exception as e:
-            logger.error(f"Ошибка при получении данных поста: {e}")
+            logger.error(f"Критическая ошибка в fetch_instagram_post: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None, None
+
+
+
+
+
     
-    def extract_video_url(self, json_data: Dict) -> Optional[str]:
-        """Извлечение URL видео из ответа Instagram API с поддержкой новых форматов"""
+    def extract_video_url(self, json_data: dict) -> Optional[str]:
+        """
+        ИСПРАВЛЕННАЯ версия extract_video_url
+        Правильно обрабатывает формат xdt_shortcode_media
+        """
         try:
-            # Поддержка как нового, так и старого формата API
+            # Логируем для отладки
+            logger.debug(f"Анализ JSON структуры: {list(json_data.keys())}")
+            
             media = None
             
             if 'data' in json_data:
-                # Новый формат: xdt_shortcode_media
+                data_keys = list(json_data['data'].keys())
+                logger.debug(f"Ключи в data: {data_keys}")
+                
+                # ВАЖНО: Сначала проверяем НОВЫЙ формат xdt_shortcode_media
                 if 'xdt_shortcode_media' in json_data['data']:
                     media = json_data['data']['xdt_shortcode_media']
-                    logger.debug("Найден формат xdt_shortcode_media")
-                # Старый формат: shortcode_media
+                    logger.info("✅ Найден новый формат: xdt_shortcode_media")
+                    
+                # Потом старый формат для совместимости
                 elif 'shortcode_media' in json_data['data']:
                     media = json_data['data']['shortcode_media']
-                    logger.debug("Найден формат shortcode_media")
-            
-            if not media:
-                logger.error("Медиа данные не найдены в JSON")
+                    logger.info("✅ Найден старый формат: shortcode_media")
+                
+                else:
+                    logger.error(f"❌ Медиа данные не найдены. Доступные ключи: {data_keys}")
+                    return None
+            else:
+                logger.error(f"❌ Ключ 'data' не найден. Доступные ключи: {list(json_data.keys())}")
                 return None
             
-            logger.debug(f"Тип медиа: {media.get('__typename', 'Unknown')}")
-            logger.debug(f"Это видео: {media.get('is_video', False)}")
+            if not media:
+                logger.error("❌ Объект media пустой")
+                return None
             
-            # Проверяем, что это видео (поддержка обоих форматов)
-            video_types = ['GraphVideo', 'XDTGraphVideo']
-            if media.get('__typename') in video_types or media.get('is_video', False):
-                # Прямой поиск video_url
-                video_url = media.get('video_url')
-                if video_url:
-                    logger.info(f"Найден video_url: {video_url[:100]}...")
-                    return video_url
+            # Логируем информацию о медиа
+            media_type = media.get('__typename', 'Unknown')
+            is_video = media.get('is_video', False)
+            logger.info(f"📱 Тип медиа: {media_type}, Это видео: {is_video}")
+            
+            # Проверяем что это видео (поддержка новых типов)
+            video_types = ['GraphVideo', 'XDTGraphVideo']  # XDTGraphVideo - новый тип!
+            
+            if media_type in video_types or is_video:
+                logger.info("✅ Подтвержден тип видео")
                 
-                # Альтернативный поиск в video_resources
-                if 'video_resources' in media and len(media['video_resources']) > 0:
-                    logger.debug(f"Найдено video_resources с {len(media['video_resources'])} вариантами")
+                # Поиск прямого video_url
+                if 'video_url' in media:
+                    video_url = media['video_url']
+                    if video_url and isinstance(video_url, str):
+                        logger.info(f"🎯 Найден прямой video_url: {video_url[:100]}...")
+                        return video_url
+                    else:
+                        logger.warning("⚠️ video_url найден, но пустой или неверного типа")
+                
+                # Поиск в video_resources (если прямого нет)
+                if 'video_resources' in media and media['video_resources']:
+                    logger.info(f"🔍 Поиск в video_resources ({len(media['video_resources'])} элементов)")
                     video_resources = media['video_resources']
-                    highest_quality = max(video_resources, key=lambda x: x.get('config_width', 0) * x.get('config_height', 0))
+                    
+                    # Берем ресурс с максимальным разрешением
+                    highest_quality = max(
+                        video_resources, 
+                        key=lambda x: x.get('config_width', 0) * x.get('config_height', 0)
+                    )
+                    
                     video_url = highest_quality.get('src')
                     if video_url:
-                        logger.info(f"Найден video_url в video_resources: {video_url[:100]}...")
+                        logger.info(f"🎯 Найден video_url в video_resources: {video_url[:100]}...")
                         return video_url
+                
+                logger.warning("⚠️ video_url не найден в стандартных местах")
             
-            # Обработка каруселей (поддержка обоих форматов)
-            elif media.get('__typename') in ['GraphSidecar', 'XDTGraphSidecar']:
-                logger.debug("Обработка карусели")
+            # Обработка каруселей (для постов с несколькими видео)
+            elif media_type in ['GraphSidecar', 'XDTGraphSidecar']:
+                logger.info("🎠 Обработка карусели")
                 edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
+                
                 for i, edge in enumerate(edges):
                     node = edge.get('node', {})
                     logger.debug(f"Элемент карусели {i+1}: {node.get('__typename', 'Unknown')}, is_video: {node.get('is_video', False)}")
+                    
                     if node.get('is_video', False):
                         video_url = node.get('video_url')
                         if video_url:
-                            logger.info(f"Найден video_url в карусели: {video_url[:100]}...")
+                            logger.info(f"🎯 Найден video_url в карусели: {video_url[:100]}...")
                             return video_url
             
-            # Рекурсивный поиск video_url в JSON (последняя попытка)
-            def find_video_url_recursive(obj):
+            # ПОСЛЕДНИЙ ШАНС: Рекурсивный поиск по всему JSON
+            logger.warning("🔍 Выполняется рекурсивный поиск video_url...")
+            
+            def find_video_url_recursive(obj, path=""):
                 if isinstance(obj, dict):
+                    # Прямой поиск video_url
                     if "video_url" in obj and isinstance(obj["video_url"], str):
+                        logger.info(f"🎯 Рекурсивно найден video_url в {path}")
                         return obj["video_url"]
+                    
+                    # Рекурсивный поиск в подобъектах
                     for key, value in obj.items():
-                        result = find_video_url_recursive(value)
+                        result = find_video_url_recursive(value, f"{path}.{key}" if path else key)
                         if result:
                             return result
+                            
                 elif isinstance(obj, list):
-                    for item in obj:
-                        result = find_video_url_recursive(item)
+                    for i, item in enumerate(obj):
+                        result = find_video_url_recursive(item, f"{path}[{i}]")
                         if result:
                             return result
+                
                 return None
             
             video_url = find_video_url_recursive(json_data)
             if video_url:
-                logger.info(f"Найден video_url рекурсивным поиском: {video_url[:100]}...")
+                logger.info(f"🎯 Найден video_url рекурсивным поиском: {video_url[:100]}...")
                 return video_url
             
-            logger.error("video_url не найден во всей структуре JSON")
-            logger.debug(f"Доступные ключи в media: {list(media.keys())[:10]}...")
+            # Если ничего не найдено - детальное логирование для отладки
+            logger.error("❌ video_url не найден нигде!")
+            logger.error(f"Доступные ключи в media: {list(media.keys())[:20]}")
+            
+            # Ищем любые ключи со словом 'video'
+            video_keys = [k for k in media.keys() if 'video' in k.lower()]
+            if video_keys:
+                logger.error(f"Найдены ключи с 'video': {video_keys}")
+            
+            # Ищем любые ключи со словом 'url'
+            url_keys = [k for k in media.keys() if 'url' in k.lower()]
+            if url_keys:
+                logger.error(f"Найдены ключи с 'url': {url_keys}")
+            
             return None
-                
+                    
         except Exception as e:
-            logger.error(f"Ошибка при извлечении URL видео: {e}")
+            logger.error(f"💥 Критическая ошибка в extract_video_url: {e}")
             import traceback
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     async def download_video_new_method(self, url: str, output_path: str) -> bool:
