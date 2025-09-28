@@ -20,9 +20,9 @@ class InstagramDownloader(BaseDownloader):
         
         # РЕАЛЬНЫЕ рабочие прокси (ЗАМЕНИТЕ НА СВОИ!)
         self.working_proxies = [
-            "username:password@proxy1.com:8080",
-            "username:password@proxy2.com:8080",
-            "username:password@proxy3.com:8080"
+            "posledtp52:TiCBNGs8sq@63.125.90.106:50100",
+            "posledtp52:TiCBNGs8sq@72.9.186.194:50100", 
+            "posledtp52:TiCBNGs8sq@5.133.163.38:50100"
         ]
         
         self.current_proxy_index = 0
