@@ -9,3 +9,7 @@ class VideoProcessing(StatesGroup):
     WAITING_FOR_ACTION = State()
     WAITING_FOR_VOICE = State()  # Новое состояние для выбора голоса
     PROCESSING_AUDIO = State()
+
+    # Новые состояния для ускорения
+    WAITING_FOR_SPEED_COEFFICIENT = State()
+    PROCESSING_SPEED = State()

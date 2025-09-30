@@ -3,10 +3,13 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command, StateFilter
+
 from handlers.video_handler import VideoHandler
 from states.states import VideoProcessing
 from services.File_Manager import FileManager
 from services.chunk_uploader import ChunkUploader
+
 
 from config.config import BOT_TOKEN, setup_logging
 import logging
@@ -93,6 +96,12 @@ class VideoBot:
             """
             await message.reply(welcome_text)
             await state.set_state(VideoProcessing.WAITING_FOR_VIDEO)
+
+        @self.dp.message(StateFilter(VideoProcessing.WAITING_FOR_SPEED_COEFFICIENT))
+        async def speed_coefficient_handler(message: types.Message, state: FSMContext):
+            """Обработчик ввода коэффициента ускорения"""
+            logger.info("🔥🔥🔥 ОБРАБОТЧИК ВЫЗВАН!")  # ВРЕМЕННОЕ ЛОГИРОВАНИЕ
+            await self.video_handler.handle_speed_coefficient_input(message, state)
 
         @self.dp.message(lambda m: m.text and any(x in m.text.lower() for x in ['youtube.com', 'youtu.be', 'instagram.com', 'kuaishou.com', 'pin.it', 'pinterest.com']))
         async def url_handler(message: types.Message, state: FSMContext):

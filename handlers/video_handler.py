@@ -34,6 +34,8 @@ from services.instagram_downloader import InstagramDownloader
 from services.connection_manager import ConnectionManager
 from services.video_streaming import VideoStreamingService
 from services.chunk_uploader import ChunkUploader
+from services.video_speed import VideoSpeedService
+
 
 from pyrogram import Client
 import os
@@ -60,7 +62,9 @@ class VideoHandler:
         self.chunk_uploader = ChunkUploader()
         self.db = Database()
         self.audio_handler = AudioHandler()
+        
         self.downloads_dir = "downloads"  # Для скачанных видео
+        self.video_speed_service = VideoSpeedService(self.downloads_dir)
         
         self.file_registry = {}
         self.bot = None  # Будет установлен позже
@@ -1052,6 +1056,9 @@ class VideoHandler:
                     [
                         InlineKeyboardButton(text="📥 Скачать", callback_data="action_download"),
                         InlineKeyboardButton(text="🎯 Распознать", callback_data="action_recognize")
+                    ],
+                    [
+                        InlineKeyboardButton(text="⚡ Ускорить", callback_data="action_speedup")
                     ]
                 ]
             )
@@ -1249,6 +1256,9 @@ class VideoHandler:
                         [
                             InlineKeyboardButton(text="📥 Скачать", callback_data="action_download"),
                             InlineKeyboardButton(text="🎯 Распознать", callback_data="action_recognize")
+                        ],
+                        [
+                            InlineKeyboardButton(text="⚡ Ускорить", callback_data="action_speedup")
                         ]
                     ]
                 )
@@ -1697,20 +1707,18 @@ class VideoHandler:
             self.active_users.discard(user_id)
 
     async def handle_action_selection(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """ИСПРАВЛЕННЫЙ метод выбора действия с улучшенным управлением ресурсами"""
+        """Обработка выбора действия с видео"""
         message_with_buttons = callback_query.message
         user_id = callback_query.from_user.id
         file_id = None
         
         try:
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем активность пользователя по-новому
             if not self.add_active_user(user_id):
                 await callback_query.answer("⏳ Дождитесь окончания обработки")
                 return
                             
             await callback_query.answer()
             
-            # Инициализируем клиент, если еще не инициализирован
             if not self.app:
                 await self.init_client()
             
@@ -1723,34 +1731,53 @@ class VideoHandler:
                 await message_with_buttons.edit_text("❌ Произошла ошибка: файлы не найдены")
                 return
             
-            # Регистрируем файл в начале обработки
-            file_id = await self._register_file(video_path)
+            # ИСПРАВЛЕНИЕ: Регистрируем файл ТОЛЬКО для download, не для speedup
+            if callback_query.data.split('_')[1] == 'download':
+                file_id = await self._register_file(video_path)
             
             action = callback_query.data.split('_')[1]
             
-            # Проверяем путь к видео
             if not os.path.exists(video_path):
                 logger.error(f"Файл не найден: {video_path}")
                 await message_with_buttons.edit_text("❌ Файл не найден")
+                return
+            
+            # ИСПРАВЛЕНИЕ: для speedup НЕ удаляем пользователя из активных и НЕ чистим файлы
+            if action == 'speedup':
+                logger.info("=" * 60)
+                logger.info("⚡ ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ УСКОРЕНИЕ")
+                logger.info(f"👤 User ID: {user_id}")
+                logger.info(f"📁 Video path: {video_path}")
+                logger.info(f"📊 Current state: {await state.get_state()}")
+                logger.info("=" * 60)
+                
+                await message_with_buttons.edit_text(
+                    "⚡ Введите коэффициент ускорения от 1 до 10:\n\n"
+                    "1 = 1.01x (почти незаметно)\n"
+                    "5 = 1.05x (умеренное ускорение)\n"
+                    "10 = 1.10x (заметное ускорение)\n\n"
+                    "Просто отправьте число от 1 до 10"
+                )
+                await state.set_state(VideoProcessing.WAITING_FOR_SPEED_COEFFICIENT)
+                
+                logger.info(f"✅ Состояние установлено: {await state.get_state()}")
+                logger.info("=" * 60)
+                
                 return
                         
             if action == 'download':
                 await message_with_buttons.edit_text("📤 Подготовка к отправке...")
                 
-                # Проверим размер файла
                 file_size = os.path.getsize(video_path)
                 file_size_mb = file_size / (1024 * 1024)
                 
                 try:
-                    # Имя файла для отправки
                     filename = self.generate_video_filename(service_type)
                     
-                    # Обновляем сообщение статуса
                     progress_message = await message_with_buttons.edit_text(
                         f"📤 Начинаю отправку видео ({file_size_mb:.1f} MB)..."
                     )
                     
-                    # Отправляем видео через единый метод
                     video_caption = f"✅ Видео успешно загружено\n📁 Имя файла: {filename}"
                     await self.send_video(
                         chat_id=original_message.chat.id,
@@ -1758,7 +1785,6 @@ class VideoHandler:
                         caption=video_caption
                     )
                     
-                    # Успешная отправка - удаляем сообщение с прогрессом
                     await progress_message.edit_text("✅ Видео успешно отправлено!")
                     await asyncio.sleep(1)
                     await progress_message.delete()
@@ -1767,7 +1793,7 @@ class VideoHandler:
                     logger.error(f"Ошибка при отправке видео: {e}")
                     await message_with_buttons.edit_text(f"❌ Ошибка при отправке видео: {str(e)[:100]}")
                     raise
-                    
+                        
             elif action == 'recognize':
                 wav_path = os.path.join(self.downloads_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}.wav")
             
@@ -1780,7 +1806,6 @@ class VideoHandler:
                     await message_with_buttons.edit_text("❌ Ошибка при извлечении аудио")
                     return
                 
-                # Сохраняем путь к wav файлу
                 await state.update_data(
                     audio_path=wav_path,
                     wav_path=wav_path
@@ -1803,20 +1828,175 @@ class VideoHandler:
                         "🌍 Выберите язык видео:",
                         reply_markup=keyboard
                     )
-                            
+                                
         except Exception as e:
             error_msg = f"❌ Ошибка: {str(e)}"
             logger.error(error_msg)
             if message_with_buttons:
                 await message_with_buttons.edit_text(error_msg)
-                    
+                        
         finally:
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно удаляем пользователя из активных
-            self.remove_active_user(user_id)
+            # ИСПРАВЛЕНИЕ: Удаляем пользователя из активных ТОЛЬКО для download и recognize
+            action = callback_query.data.split('_')[1]
+            if action != 'speedup':
+                self.remove_active_user(user_id)
+                
+                # Очищаем файлы только для download
+                if action == 'download' and file_id:
+                    await self.cleanup_files(file_id)
+
+    async def handle_speed_coefficient_input(self, message: types.Message, state: FSMContext):
+        """Обработка ввода коэффициента ускорения"""
+        user_id = message.from_user.id
+        
+        logger.info("=" * 60)
+        logger.info(f"🎯 ПОЛУЧЕН ВВОД КОЭФФИЦИЕНТА от пользователя {user_id}")
+        logger.info(f"📝 Текст сообщения: '{message.text}'")
+        logger.info("=" * 60)
+        
+        try:
+            # НЕ ПРОВЕРЯЕМ активность - пользователь уже активен после нажатия кнопки
             
-            # Очищаем файлы только если это была операция download
-            if action == 'download' and file_id:
-                await self.cleanup_files(file_id)
+            # Проверяем что это число
+            try:
+                coefficient = int(message.text.strip())
+                logger.info(f"✅ Коэффициент распознан: {coefficient}")
+            except ValueError:
+                logger.warning(f"❌ Не удалось распознать число: {message.text}")
+                await message.reply(
+                    "❌ Пожалуйста, отправьте число от 1 до 10\n"
+                    "Например: 5"
+                )
+                return
+            
+            if not 1 <= coefficient <= 10:
+                logger.warning(f"❌ Коэффициент вне диапазона: {coefficient}")
+                await message.reply(
+                    "❌ Число должно быть от 1 до 10\n"
+                    "Попробуйте еще раз"
+                )
+                return
+            
+            data = await state.get_data()
+            video_path = data.get('video_path')
+            service_type = data.get('service_type', 'unknown')
+            
+            logger.info(f"📁 Путь к видео из состояния: {video_path}")
+            logger.info(f"🎬 Тип сервиса: {service_type}")
+            
+            if not video_path:
+                logger.error("❌ video_path отсутствует в состоянии!")
+                await message.reply("❌ Видео файл не найден в состоянии")
+                self.remove_active_user(user_id)
+                return
+                
+            if not os.path.exists(video_path):
+                logger.error(f"❌ Файл не существует: {video_path}")
+                await message.reply("❌ Видео файл не найден на диске")
+                self.remove_active_user(user_id)
+                return
+            
+            # Показываем статус
+            status_message = await message.reply(
+                f"⚡ Ускоряю видео с коэффициентом 1.{coefficient:02d}x...\n"
+                f"Это может занять некоторое время..."
+            )
+            
+            logger.info(f"🚀 Запускаем ускорение видео...")
+            
+            # Ускоряем видео
+            processed_path = await self.video_speed_service.speed_up_video(
+                input_path=video_path,
+                speed_coefficient=coefficient,
+                keep_original=True
+            )
+            
+            logger.info(f"📤 Результат обработки: {processed_path}")
+            
+            if not processed_path or not os.path.exists(processed_path):
+                logger.error("❌ Обработанный файл не создан")
+                await status_message.edit_text("❌ Не удалось обработать видео")
+                self.remove_active_user(user_id)
+                return
+            
+            # Проверяем размер
+            processed_size = os.path.getsize(processed_path)
+            processed_size_mb = processed_size / (1024 * 1024)
+            logger.info(f"✅ Обработанное видео: {processed_path} ({processed_size_mb:.2f} MB)")
+            
+            # Отправляем результат
+            await status_message.edit_text("📤 Отправляю обработанное видео...")
+            
+            if not self.app:
+                await self.init_client()
+            
+            filename = self.generate_video_filename(
+                service_type=service_type,
+                action=f'speed{coefficient}x'
+            )
+            
+            video_caption = (
+                f"✅ Видео ускорено в 1.{coefficient:02d}x\n"
+                f"📁 Имя файла: {filename}\n"
+                f"📦 Размер: {processed_size_mb:.1f} MB"
+            )
+            
+            try:
+                await self.app.send_video(
+                    chat_id=message.chat.id,
+                    video=processed_path,
+                    caption=video_caption
+                )
+                
+                logger.info(f"✅ Обработанное видео успешно отправлено")
+                await status_message.delete()
+                
+            except Exception as send_error:
+                logger.error(f"❌ Ошибка при отправке через Pyrogram: {send_error}")
+                
+                try:
+                    await status_message.edit_text("📤 Пробую альтернативный способ отправки...")
+                    
+                    async with aiofiles.open(processed_path, 'rb') as video_file:
+                        await self.bot.send_video(
+                            chat_id=message.chat.id,
+                            video=types.BufferedInputFile(
+                                await video_file.read(),
+                                filename=filename
+                            ),
+                            caption=video_caption
+                        )
+                    
+                    await status_message.delete()
+                    logger.info(f"✅ Видео отправлено через fallback метод")
+                    
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback также не сработал: {fallback_error}")
+                    await status_message.edit_text(f"❌ Не удалось отправить видео")
+            
+            # Очищаем файлы
+            try:
+                if os.path.exists(processed_path):
+                    os.remove(processed_path)
+                    logger.info(f"🗑 Удален обработанный файл: {processed_path}")
+                
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                    logger.info(f"🗑 Удален оригинальный файл: {video_path}")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при удалении файлов: {e}")
+            
+            # Сбрасываем состояние
+            await state.clear()
+            
+        except Exception as e:
+            error_msg = f"❌ Ошибка при ускорении видео: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            await message.reply(error_msg)
+            
+        finally:
+            self.remove_active_user(user_id)
 
     async def _upload_progress(self, current, total, message):
         """Обновление прогресса отправки"""
@@ -2004,16 +2184,9 @@ class VideoHandler:
             self.active_users.discard(user_id)
 
     def generate_video_filename(self, service_type: str, action: str = 'download', text_lang: str = None) -> str:
-        """
-        Генерация уникального имени файла
-        Args:
-            service_type: Тип сервиса (rednote, kuaishou и т.д.)
-            action: Тип действия (download, recognition)
-            text_lang: Язык распознавания (если есть)
-        """
+        """Генерация уникального имени файла"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Префиксы для разных сервисов
         service_prefix = {
             'rednote': 'RN',
             'kuaishou': 'KS',
@@ -2023,7 +2196,6 @@ class VideoHandler:
             'unknown': 'VIDEO'
         }.get(service_type, 'VIDEO')
         
-        # Добавляем информацию о действии и языке
         if action == 'recognition' and text_lang:
             lang_suffix = {
                 'ru': 'RUS',
@@ -2031,5 +2203,9 @@ class VideoHandler:
                 'zh': 'CHN'
             }.get(text_lang, '')
             return f"{service_prefix}_RECOG_{lang_suffix}_{timestamp}.mp4"
+        
+        # Для ускоренных видео
+        if action.startswith('speed'):
+            return f"{service_prefix}_{action.upper()}_{timestamp}.mp4"
         
         return f"{service_prefix}_{timestamp}.mp4"
