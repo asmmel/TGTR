@@ -17,14 +17,15 @@ import requests
 from curl_cffi import requests as cffi_requests
 
 from services.base_downloader import BaseDownloader
-from config.config import INSTAGRAM_PROXIES, DOWNLOADS_DIR
+from services.proxy_storage import get_proxies
+from config.config import DOWNLOADS_DIR
 
 logger = logging.getLogger(__name__)
 
 
 def _get_proxy_url() -> Optional[str]:
-    """Случайный прокси из списка для запросов к Instagram."""
-    proxies = INSTAGRAM_PROXIES
+    """Случайный прокси из актуального списка (читается из файла/.env при каждом вызове)."""
+    proxies = get_proxies()
     if not proxies:
         return None
     proxy_str = random.choice(proxies)
@@ -106,7 +107,7 @@ class InstagramDownloader(BaseDownloader):
 
         except Exception as e:
             logger.warning(f"Fetch error for {shortcode} (attempt {attempt}): {e}")
-            max_fetch_attempts = min(4, max(3, len(INSTAGRAM_PROXIES or [])))
+            max_fetch_attempts = min(4, max(3, len(get_proxies() or [])))
             if attempt < max_fetch_attempts:
                 time.sleep(random.uniform(2, 5))
                 return self._fetch_video_url(shortcode, attempt + 1)

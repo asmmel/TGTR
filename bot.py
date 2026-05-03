@@ -11,7 +11,8 @@ from services.File_Manager import FileManager
 from services.chunk_uploader import ChunkUploader
 
 
-from config.config import BOT_TOKEN, setup_logging
+from config.config import BOT_TOKEN, ADMIN_IDS, setup_logging
+from services.proxy_storage import get_proxies, set_proxies
 import logging
 import os
 import asyncio
@@ -188,6 +189,54 @@ class VideoBot:
             await self.video_handler.handle_audio_action(callback_query, state)
 
         
+
+        @self.dp.message(Command(commands=['myid']))
+        async def myid_command(message: types.Message):
+            await message.reply(
+                f"Твой Telegram ID: <code>{message.from_user.id}</code>\n\n"
+                f"Чтобы получить доступ к админ-командам, добавь его в "
+                f"<code>ADMIN_IDS</code> в .env",
+                parse_mode="HTML"
+            )
+
+        @self.dp.message(Command(commands=['proxies']))
+        async def proxies_command(message: types.Message):
+            if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+                return
+            proxies = get_proxies()
+            if not proxies:
+                await message.reply("📋 Instagram прокси не настроены")
+                return
+            text = f"📋 Текущие Instagram прокси ({len(proxies)} шт.):\n\n"
+            for i, p in enumerate(proxies, 1):
+                text += f"{i}. <code>{p}</code>\n"
+            await message.reply(text, parse_mode="HTML")
+
+        @self.dp.message(Command(commands=['setproxies']))
+        async def setproxies_command(message: types.Message):
+            if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+                return
+            text = message.text or ""
+            lines = [ln.strip() for ln in text.split('\n')]
+            new_proxies = [ln for ln in lines[1:] if ln and not ln.startswith('/')]
+            if not new_proxies:
+                await message.reply(
+                    "Использование (каждая строка — отдельный прокси):\n\n"
+                    "<pre>/setproxies\n"
+                    "login:pass@host:port\n"
+                    "login2:pass2@host2:port2</pre>",
+                    parse_mode="HTML"
+                )
+                return
+            count = set_proxies(new_proxies)
+            await message.reply(f"✅ Сохранено {count} прокси. Изменения применятся к следующему запросу.")
+
+        @self.dp.message(Command(commands=['clearproxies']))
+        async def clearproxies_command(message: types.Message):
+            if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+                return
+            set_proxies([])
+            await message.reply("🗑 Список прокси очищен. Будут использованы из .env (если есть).")
 
         # Добавляем обработчик ошибок
         @self.dp.errors()
