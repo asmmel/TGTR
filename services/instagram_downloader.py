@@ -1,325 +1,222 @@
+"""Скачивание видео из Instagram по URL.
+
+Подход: загрузка страницы рилса через curl_cffi (Chrome TLS) + прокси,
+парсинг video_versions из embedded JSON, скачивание CDN-ссылки напрямую.
+"""
 import re
 import json
-import time
-import requests
-import logging
 import os
 import asyncio
-from typing import Optional, Dict, Tuple, Any
-from datetime import datetime
-from config.config import setup_logging
-from services.base_downloader import BaseDownloader
+import random
+import string
+import time
+import logging
+from typing import Optional, Dict
 
-logger = setup_logging(__name__)
+import requests
+from curl_cffi import requests as cffi_requests
+
+from services.base_downloader import BaseDownloader
+from config.config import INSTAGRAM_PROXIES, DOWNLOADS_DIR
+
+logger = logging.getLogger(__name__)
+
+
+def _get_proxy_url() -> Optional[str]:
+    """Случайный прокси из списка для запросов к Instagram."""
+    proxies = INSTAGRAM_PROXIES
+    if not proxies:
+        return None
+    proxy_str = random.choice(proxies)
+    at_idx = proxy_str.find('@')
+    if at_idx == -1:
+        return f'http://{proxy_str}'
+    creds = proxy_str[:at_idx]
+    host_port = proxy_str[at_idx + 1:]
+    login, password = creds.split(':', 1)
+    if 'proxy-seller' in host_port:
+        sticky_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        login = f'{login}_s_{sticky_id}_ttl_10m'
+    return f'http://{login}:{password}@{host_port}'
+
 
 class InstagramDownloader(BaseDownloader):
-    """Instagram Downloader с ПРОВЕРЕННЫМИ рабочими прокси"""
-    
-    def __init__(self, downloads_dir="downloads"):
-        super().__init__(downloads_dir)
-        
-        # РЕАЛЬНЫЕ рабочие прокси (ЗАМЕНИТЕ НА СВОИ!)
-        self.working_proxies = [
-            "posledtp52:TiCBNGs8sq@63.125.90.106:50100",
-            "posledtp52:TiCBNGs8sq@72.9.186.194:50100", 
-            "posledtp52:TiCBNGs8sq@5.133.163.38:50100"
-        ]
-        
-        self.current_proxy_index = 0
-        
-        # Создаем сессии
-        self.api_session = None
-        self.download_session = None
-        self._init_sessions()
-        
-        logger.info("✅ InstagramDownloader инициализирован с проверкой прокси")
-    
-    def _init_sessions(self):
-        """Инициализация сессий с проверкой прокси"""
-        # API сессия с прокси
-        self.api_session = requests.Session()
-        self._setup_proxy_session()
-        
-        # Сессия для скачивания БЕЗ прокси
-        self.download_session = requests.Session()
-        self.download_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "video/webm,video/ogg,video/*;q=0.9,*/*;q=0.5",
-            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-        })
-        
-        logger.info("🔧 Сессии инициализированы")
-    
-    def _setup_proxy_session(self):
-        """Настройка прокси для API сессии с ПРОВЕРКОЙ"""
-        if not self.working_proxies:
-            logger.warning("⚠️ Нет настроенных прокси!")
-            return
-        
-        proxy_string = self.working_proxies[self.current_proxy_index]
-        proxy_url = f"http://{proxy_string}"
-        
-        # Настраиваем прокси
-        self.api_session.proxies = {
-            'http': proxy_url,
-            'https': proxy_url
-        }
-        
-        # Специальные заголовки для Instagram API
-        self.api_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0"
-        })
-        
-        # КРИТИЧНО: Проверяем что прокси РЕАЛЬНО работает
-        try:
-            logger.info(f"🔍 Проверяем прокси: {proxy_string}")
-            
-            # Тестируем прокси на реальном запросе
-            test_response = self.api_session.get(
-                'https://httpbin.org/ip', 
-                timeout=15,
-                allow_redirects=True
-            )
-            
-            if test_response.status_code == 200:
-                response_data = test_response.json()
-                proxy_ip = response_data.get('origin', 'unknown')
-                logger.info(f"✅ Прокси #{self.current_proxy_index + 1} работает! IP: {proxy_ip}")
-                
-                # Дополнительная проверка - можем ли мы достучаться до Instagram
-                try:
-                    ig_test = self.api_session.get(
-                        'https://www.instagram.com/',
-                        timeout=10,
-                        allow_redirects=True
-                    )
-                    if ig_test.status_code == 200:
-                        logger.info("✅ Instagram доступен через прокси")
-                    else:
-                        logger.warning(f"⚠️ Instagram вернул статус {ig_test.status_code} через прокси")
-                except Exception as e:
-                    logger.warning(f"⚠️ Проблема доступа к Instagram через прокси: {e}")
-                    
-            else:
-                logger.error(f"❌ Прокси не работает! Статус: {test_response.status_code}")
-                self._rotate_proxy()
-                
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка прокси: {e}")
-            self._rotate_proxy()
-    
-    def _rotate_proxy(self):
-        """Переключение на следующий прокси"""
-        if not self.working_proxies:
-            return
-            
-        old_index = self.current_proxy_index
-        self.current_proxy_index = (self.current_proxy_index + 1) % len(self.working_proxies)
-        
-        logger.info(f"🔄 Переключаемся с прокси #{old_index + 1} на #{self.current_proxy_index + 1}")
-        self._setup_proxy_session()
-    
+    """Загрузчик видео из Instagram.
+
+    1) Загружаем страницу рилса через curl_cffi + прокси
+    2) Парсим video_versions из embedded JSON в HTML
+    3) Скачиваем CDN-ссылку напрямую без прокси
+    """
+
+    def __init__(self, downloads_dir=None):
+        super().__init__(downloads_dir or DOWNLOADS_DIR)
+
     def extract_shortcode(self, url: str) -> Optional[str]:
-        """Извлечение shortcode из URL Instagram"""
         patterns = [
-            r'/p/([A-Za-z0-9_-]+)/',     # Posts
-            r'/reel/([A-Za-z0-9_-]+)/',  # Reels
-            r'/tv/([A-Za-z0-9_-]+)/',    # IGTV
-            r'/([A-Za-z0-9_-]+)/?$'      # Direct shortcode
+            r'/p/([A-Za-z0-9_-]+)',
+            r'/reel/([A-Za-z0-9_-]+)',
+            r'/tv/([A-Za-z0-9_-]+)',
         ]
-        
         for pattern in patterns:
             match = re.search(pattern, url)
             if match:
                 return match.group(1)
-        
         return None
-    
-    async def get_page_content_via_proxy(self, shortcode: str) -> Optional[str]:
-        """Получение HTML страницы Instagram через прокси"""
-        url = f"https://www.instagram.com/reel/{shortcode}/"
-        
-        # Попробуем несколько раз с разными прокси
-        for attempt in range(len(self.working_proxies)):
+
+    def _fetch_video_url(self, shortcode: str, attempt: int = 1) -> Optional[str]:
+        """Загрузить страницу рилса и извлечь лучший video URL (синхронно).
+        curl_cffi + прокси для обхода TLS fingerprinting."""
+        logger.info(f"Fetching reel page for {shortcode} (attempt {attempt})")
+        proxy_url = _get_proxy_url()
+        sess = cffi_requests.Session(impersonate="chrome")
+
+        try:
+            resp = sess.get(
+                f'https://www.instagram.com/reel/{shortcode}/',
+                proxy=proxy_url,
+                timeout=30
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Page load HTTP {resp.status_code} for {shortcode}")
+                return None
+
+            content = resp.text
+
+            # Метод 1: video_versions JSON array (лучший вариант — выбираем макс. разрешение)
+            m = re.search(r'"video_versions":\s*(\[.*?\])', content)
+            if m:
+                raw = m.group(1).replace('\\/', '/')
+                versions = json.loads(raw)
+                if versions:
+                    best = max(versions, key=lambda x: x.get('width', 0) * x.get('height', 0))
+                    url = best.get('url', '')
+                    if url:
+                        logger.info(f"Found video_versions: {best.get('width')}x{best.get('height')}")
+                        return url
+
+            # Метод 2: video_url в embedded data
+            m2 = re.search(r'"video_url":"([^"]+)"', content)
+            if m2:
+                url = m2.group(1).replace('\\u0026', '&').replace('\\/', '/')
+                logger.info("Found video_url in page data")
+                return url
+
+            logger.warning(f"No video URL found in page for {shortcode}")
+            return None
+
+        except Exception as e:
+            logger.warning(f"Fetch error for {shortcode} (attempt {attempt}): {e}")
+            max_fetch_attempts = min(4, max(3, len(INSTAGRAM_PROXIES or [])))
+            if attempt < max_fetch_attempts:
+                time.sleep(random.uniform(2, 5))
+                return self._fetch_video_url(shortcode, attempt + 1)
+            return None
+        finally:
             try:
-                logger.info(f"🌐 Запрос к {url} через прокси #{self.current_proxy_index + 1} (попытка {attempt + 1})")
-                
-                # Делаем запрос через прокси
-                response = self.api_session.get(
-                    url,
-                    timeout=20,
-                    allow_redirects=True,
-                    verify=True  # Проверяем SSL
-                )
-                
-                logger.info(f"📊 Ответ: {response.status_code}, размер: {len(response.text)} байт")
-                
-                if response.status_code == 200:
-                    if 'video_url' in response.text or 'videoUrl' in response.text:
-                        logger.info("✅ Найдены видео данные в HTML")
-                        return response.text
-                    else:
-                        logger.warning("⚠️ HTML получен, но видео данных нет")
-                        
-                elif response.status_code == 403:
-                    logger.warning(f"❌ 403 Forbidden через прокси #{self.current_proxy_index + 1}")
-                    self._rotate_proxy()
-                    await asyncio.sleep(2)
-                    continue
-                    
-                elif response.status_code == 429:
-                    logger.warning(f"❌ 429 Rate Limit через прокси #{self.current_proxy_index + 1}")
-                    self._rotate_proxy()
-                    await asyncio.sleep(5)
-                    continue
-                    
+                sess.close()
+            except Exception:
+                pass
+
+    def _download_file(self, video_url: str, output_path: str,
+                       max_attempts: int = 3, timeout: int = 120) -> bool:
+        """Скачать видео по прямой CDN-ссылке с retry.
+
+        Стратегия (попытки):
+          1. curl_cffi + Chrome TLS напрямую без прокси
+          2. curl_cffi + Chrome TLS + через прокси
+          3. requests (fallback) + прокси
+
+        Поддерживает HTTP Range для докачивания при оборванном TCP.
+        """
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "video/*;q=0.9,*/*;q=0.5",
+            "Accept-Encoding": "identity",
+            "Referer": "https://www.instagram.com/",
+        }
+
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            use_cffi = attempt <= 2
+            use_proxy = attempt >= 2
+            proxy_url = _get_proxy_url() if use_proxy else None
+
+            resume_from = 0
+            if os.path.exists(output_path):
+                try:
+                    resume_from = os.path.getsize(output_path)
+                except OSError:
+                    resume_from = 0
+
+            req_headers = dict(headers)
+            mode = 'wb'
+            if resume_from > 0:
+                req_headers['Range'] = f'bytes={resume_from}-'
+                mode = 'ab'
+                logger.info(f"Download attempt {attempt}/{max_attempts}: "
+                            f"resuming from {resume_from} bytes "
+                            f"(proxy={'yes' if use_proxy else 'no'}, cffi={use_cffi})")
+            else:
+                logger.info(f"Download attempt {attempt}/{max_attempts} "
+                            f"(proxy={'yes' if use_proxy else 'no'}, cffi={use_cffi})")
+
+            try:
+                downloaded = resume_from
+                if use_cffi:
+                    sess = cffi_requests.Session(impersonate="chrome")
+                    try:
+                        resp = sess.get(video_url, headers=req_headers,
+                                        proxy=proxy_url, timeout=timeout,
+                                        stream=True)
+                        if resp.status_code not in (200, 206):
+                            raise Exception(f"HTTP {resp.status_code}")
+                        with open(output_path, mode) as f:
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                    finally:
+                        try:
+                            sess.close()
+                        except Exception:
+                            pass
                 else:
-                    logger.warning(f"❌ Неожиданный статус {response.status_code}")
-                    self._rotate_proxy()
-                    await asyncio.sleep(2)
-                    continue
-                    
-            except requests.exceptions.ProxyError as e:
-                logger.error(f"❌ Ошибка прокси: {e}")
-                self._rotate_proxy()
-                await asyncio.sleep(2)
-                continue
-                
-            except requests.exceptions.Timeout as e:
-                logger.error(f"❌ Таймаут прокси: {e}")
-                self._rotate_proxy()
-                await asyncio.sleep(2)
-                continue
-                
-            except Exception as e:
-                logger.error(f"❌ Неожиданная ошибка: {e}")
-                self._rotate_proxy()
-                await asyncio.sleep(2)
-                continue
-        
-        logger.error("❌ Все прокси исчерпаны!")
-        return None
-    
-    def extract_video_url_from_html(self, html_content: str) -> Optional[str]:
-        """Извлечение URL видео из HTML страницы"""
-        try:
-            # Паттерны для поиска видео URL
-            patterns = [
-                r'"video_url":"([^"]+)"',
-                r'"videoUrl":"([^"]+)"',
-                r'videoUrl":\s*"([^"]+)"',
-                r'"src":"([^"]+\.mp4[^"]*)"',
-                r'https://[^"]*\.cdninstagram\.com/[^"]*\.mp4[^"]*'
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, html_content)
-                for match in matches:
-                    # Декодируем экранированные символы
-                    video_url = match.replace('\\u0026', '&').replace('\/', '/')
-                    
-                    # Проверяем что это похоже на видео URL
-                    if '.mp4' in video_url and ('cdninstagram.com' in video_url or 'fbcdn.net' in video_url):
-                        logger.info(f"🎯 Найден video_url: {video_url[:100]}...")
-                        return video_url
-            
-            logger.warning("❌ video_url не найден в HTML")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга HTML: {e}")
-            return None
-    
-    async def download_video_direct(self, video_url: str, output_path: str) -> bool:
-        """Загрузка видео БЕЗ прокси"""
-        try:
-            logger.info(f"📥 Прямая загрузка видео (БЕЗ прокси)")
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "video/webm,video/ogg,video/*;q=0.9,*/*;q=0.5",
-                "Referer": "https://www.instagram.com/",
-                "Origin": "https://www.instagram.com"
-            }
-            
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            
-            # Скачиваем БЕЗ прокси
-            response = self.download_session.get(
-                video_url, 
-                headers=headers, 
-                stream=True, 
-                timeout=60
-            )
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            logger.info(f"💾 Сохранение: {total_size / (1024*1024):.2f} MB")
-            
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-            
-            logger.info(f"✅ Загружено: {downloaded / (1024*1024):.2f} MB")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки: {e}")
-            return False
-    
-    async def download_via_ytdlp(self, url: str, output_path: str) -> bool:
-        """Fallback через yt-dlp"""
-        try:
-            logger.info(f"🔄 Fallback: yt-dlp")
-            
-            import yt_dlp
-            
-            ydl_opts = {
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': output_path,
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            # Если есть рабочий прокси, используем его для yt-dlp
-            if self.working_proxies:
-                proxy_string = self.working_proxies[self.current_proxy_index]
-                ydl_opts['proxy'] = f"http://{proxy_string}"
-                logger.info(f"yt-dlp использует прокси: {proxy_string}")
-            
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: yt_dlp.YoutubeDL(ydl_opts).download([url])
-            )
-            
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info("✅ yt-dlp успешно загрузил видео")
+                    proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
+                    with requests.get(video_url, headers=req_headers,
+                                      stream=True, timeout=timeout,
+                                      proxies=proxies) as resp:
+                        resp.raise_for_status()
+                        with open(output_path, mode) as f:
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+
+                size_mb = downloaded / (1024 * 1024)
+                logger.info(f"Downloaded {size_mb:.1f} MB -> {output_path} (attempt {attempt})")
                 return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка yt-dlp: {e}")
-            return False
-    
+
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Download attempt {attempt}/{max_attempts} failed: {e}")
+                if attempt >= max_attempts:
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                        except OSError:
+                            pass
+                continue
+
+        logger.error(f"Download failed after {max_attempts} attempts: {last_err}")
+        return False
+
     async def extract_video_info(self, url: str) -> Dict:
-        """Получение информации о видео"""
         shortcode = self.extract_shortcode(url)
         return {
             'title': f'Instagram Video {shortcode}',
@@ -329,59 +226,65 @@ class InstagramDownloader(BaseDownloader):
             'formats': [],
             'is_live': False
         }
-    
+
     async def download_video(self, url: str, output_path: str = None) -> Optional[str]:
-        """Главный метод загрузки"""
+        """Скачать видео из Instagram.
+
+        1. Парсинг video_url из страницы (curl_cffi + Chrome TLS + прокси)
+        2. Скачивание файла (3 попытки: direct → cffi+proxy → requests+proxy)
+        3. yt-dlp fallback
+        """
+        shortcode = self.extract_shortcode(url)
+        if not shortcode:
+            logger.error(f"Invalid Instagram URL: {url}")
+            return None
+
         if not output_path:
             output_path = self.generate_output_filename("instagram")
-        
+
+        # Метод 1: парсинг video_versions из страницы (curl_cffi + прокси)
         try:
-            logger.info(f"🚀 Загрузка Instagram видео: {url}")
-            
-            shortcode = self.extract_shortcode(url)
-            if not shortcode:
-                logger.error("❌ Не удалось извлечь shortcode")
-                return None
-            
-            # МЕТОД 1: Получаем HTML через прокси, скачиваем напрямую
-            html_content = await self.get_page_content_via_proxy(shortcode)
-            if html_content:
-                video_url = self.extract_video_url_from_html(html_content)
-                if video_url:
-                    success = await self.download_video_direct(video_url, output_path)
-                    if success:
-                        logger.info("✅ Успешно через прокси + прямое скачивание")
-                        return output_path
-            
-            logger.warning("Метод 1 не сработал, пробуем yt-dlp...")
-            
-            # МЕТОД 2: yt-dlp с прокси
-            success = await self.download_via_ytdlp(url, output_path)
-            if success:
-                logger.info("✅ Успешно через yt-dlp")
-                return output_path
-            
-            logger.error("❌ Все методы провалились")
-            
-            # Удаляем частично загруженный файл
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except:
-                    pass
-            
-            return None
-            
+            video_url = await asyncio.to_thread(self._fetch_video_url, shortcode)
+            if video_url:
+                logger.info(f"Downloading video for {shortcode}...")
+                success = await asyncio.to_thread(self._download_file, video_url, output_path)
+                if success and os.path.exists(output_path):
+                    return output_path
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
-            return None
-    
-    def __del__(self):
-        """Очистка ресурсов"""
+            logger.warning(f"Page parse method failed: {e}")
+
+        # Метод 2: yt-dlp fallback
         try:
-            if hasattr(self, 'api_session'):
-                self.api_session.close()
-            if hasattr(self, 'download_session'):
-                self.download_session.close()
-        except:
-            pass
+            logger.info(f"Trying yt-dlp fallback for {url}")
+            import yt_dlp
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': output_path,
+                'quiet': True,
+                'no_warnings': True,
+                'merge_output_format': 'mp4',
+                'retries': 3,
+            }
+            proxy_url = _get_proxy_url()
+            if proxy_url:
+                ydl_opts['proxy'] = proxy_url
+
+            def _run_ytdlp():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+
+            await asyncio.to_thread(_run_ytdlp)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+        except ImportError:
+            logger.warning("yt-dlp not installed, skipping fallback")
+        except Exception as e:
+            logger.warning(f"yt-dlp failed: {e}")
+
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+
+        return None

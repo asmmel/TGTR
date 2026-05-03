@@ -83,6 +83,10 @@ PROXY_DLP = os.getenv("PROXY_DLP")
 
 PROXY_TTS = os.getenv("PROXY_TTS_1")
 
+# Instagram прокси (через запятую в env, формат: login:password@host:port)
+_raw_ig_proxies = os.getenv('INSTAGRAM_PROXIES', '')
+INSTAGRAM_PROXIES = [p.strip() for p in _raw_ig_proxies.split(',') if p.strip()] if _raw_ig_proxies else []
+
 ELEVENLABS_API_KEY = os.getenv("API_ELEVENLABS")
 
 TTS_CONFIG = {

@@ -15,6 +15,7 @@ cachetools==5.5.1
 certifi==2024.12.14
 cffi==1.17.1
 charset-normalizer==3.4.1
+curl_cffi>=0.7.0
 colorama==0.4.6
 cryptography==44.0.0
 decorator==4.4.2
