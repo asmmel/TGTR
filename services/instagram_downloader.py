@@ -10,7 +10,6 @@ import asyncio
 import random
 import string
 import time
-import logging
 from typing import Optional, Dict
 
 import requests
@@ -18,9 +17,9 @@ from curl_cffi import requests as cffi_requests
 
 from services.base_downloader import BaseDownloader
 from services.proxy_storage import get_proxies
-from config.config import DOWNLOADS_DIR
+from config.config import DOWNLOADS_DIR, setup_logging
 
-logger = logging.getLogger(__name__)
+logger = setup_logging(__name__)
 
 
 def _get_proxy_url() -> Optional[str]:
