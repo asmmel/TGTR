@@ -4,6 +4,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 
 from handlers.video_handler import VideoHandler
 from states.states import VideoProcessing
@@ -11,7 +13,7 @@ from services.File_Manager import FileManager
 from services.chunk_uploader import ChunkUploader
 
 
-from config.config import BOT_TOKEN, ADMIN_IDS, setup_logging
+from config.config import BOT_TOKEN, ADMIN_IDS, LOCAL_API_URL, setup_logging
 from services.proxy_storage import get_proxies, set_proxies
 import logging
 import os
@@ -30,7 +32,14 @@ class VideoBot:
     async def initialize(self):
         """Инициализация бота и диспетчера"""
         if not self.bot:
-            self.bot = Bot(token=BOT_TOKEN)
+            if LOCAL_API_URL:
+                local_api = TelegramAPIServer.from_base(LOCAL_API_URL, is_local=True)
+                session = AiohttpSession(api=local_api)
+                self.bot = Bot(token=BOT_TOKEN, session=session)
+                logger.info(f"Bot initialized with local API server: {LOCAL_API_URL}")
+            else:
+                self.bot = Bot(token=BOT_TOKEN)
+                logger.info("Bot initialized with cloud API (no LOCAL_API_URL set)")
             
         if not self.dp:
             self.dp = Dispatcher(storage=self.storage)

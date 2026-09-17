@@ -91,6 +91,9 @@ INSTAGRAM_PROXIES = [p.strip() for p in _raw_ig_proxies.split(',') if p.strip()]
 _raw_admins = os.getenv('ADMIN_IDS', '')
 ADMIN_IDS = [int(x.strip()) for x in _raw_admins.split(',') if x.strip().isdigit()]
 
+# Локальный Telegram Bot API server (для файлов >20MB)
+LOCAL_API_URL = os.getenv('LOCAL_API_URL', 'http://localhost:8081')
+
 ELEVENLABS_API_KEY = os.getenv("API_ELEVENLABS")
 
 TTS_CONFIG = {
