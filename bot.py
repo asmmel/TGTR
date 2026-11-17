@@ -247,8 +247,7 @@ class VideoBot:
         async def myid_command(message: types.Message):
             await message.reply(
                 f"Твой Telegram ID: <code>{message.from_user.id}</code>\n\n"
-                f"Чтобы получить доступ к админ-командам, добавь его в "
-                f"<code>ADMIN_IDS</code> в .env",
+                f"Этот бот приватный.",
                 parse_mode="HTML"
             )
 
