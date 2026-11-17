@@ -91,6 +91,15 @@ INSTAGRAM_PROXIES = [p.strip() for p in _raw_ig_proxies.split(',') if p.strip()]
 _raw_admins = os.getenv('ADMIN_IDS', '')
 ADMIN_IDS = [int(x.strip()) for x in _raw_admins.split(',') if x.strip().isdigit()]
 
+# Белый список пользователей, которым разрешено пользоваться ботом.
+# Пусто = открыто для всех. Админы автоматически включены.
+_raw_allowed = os.getenv('ALLOWED_USERS', '')
+ALLOWED_USERS = [int(x.strip()) for x in _raw_allowed.split(',') if x.strip().isdigit()]
+if ALLOWED_USERS:
+    for _aid in ADMIN_IDS:
+        if _aid not in ALLOWED_USERS:
+            ALLOWED_USERS.append(_aid)
+
 # Локальный Telegram Bot API server (для файлов >20MB)
 LOCAL_API_URL = os.getenv('LOCAL_API_URL', 'http://localhost:8081')
 

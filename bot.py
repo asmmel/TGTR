@@ -1,4 +1,4 @@
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -13,13 +13,50 @@ from services.File_Manager import FileManager
 from services.chunk_uploader import ChunkUploader
 
 
-from config.config import BOT_TOKEN, ADMIN_IDS, LOCAL_API_URL, setup_logging
+from config.config import BOT_TOKEN, ADMIN_IDS, ALLOWED_USERS, LOCAL_API_URL, setup_logging
 from services.proxy_storage import get_proxies, set_proxies
 import logging
 import os
 import asyncio
 
 logger = setup_logging(__name__)
+
+
+class AccessControlMiddleware(BaseMiddleware):
+    """Whitelist gate. Пустой ALLOWED_USERS = доступ открыт всем (старое поведение).
+    /myid всегда проходит, чтобы незнакомец мог узнать свой ID и попросить доступ."""
+
+    PUBLIC_COMMANDS = {'/myid', '/start', '/help'}
+
+    async def __call__(self, handler, event, data):
+        if not ALLOWED_USERS:
+            return await handler(event, data)
+
+        user = getattr(event, 'from_user', None)
+        if not user or user.id in ALLOWED_USERS:
+            return await handler(event, data)
+
+        if isinstance(event, types.Message) and event.text:
+            cmd = event.text.split()[0].split('@')[0].lower()
+            if cmd == '/myid':
+                return await handler(event, data)
+            if cmd in ('/start', '/help'):
+                try:
+                    await event.reply(
+                        "🚫 Этот бот приватный. Если нужен доступ — пришли свой "
+                        "Telegram ID (команда /myid) владельцу."
+                    )
+                except Exception:
+                    pass
+                return
+
+        logger.info(f"Access denied: user_id={user.id} username={user.username!r}")
+        if isinstance(event, types.CallbackQuery):
+            try:
+                await event.answer("🚫 Нет доступа", show_alert=False)
+            except Exception:
+                pass
+        return
 
 class VideoBot:
     def __init__(self):
@@ -43,6 +80,13 @@ class VideoBot:
             
         if not self.dp:
             self.dp = Dispatcher(storage=self.storage)
+            access = AccessControlMiddleware()
+            self.dp.message.middleware(access)
+            self.dp.callback_query.middleware(access)
+            if ALLOWED_USERS:
+                logger.info(f"Access control ON: {len(ALLOWED_USERS)} allowed user(s)")
+            else:
+                logger.info("Access control OFF: bot is public")
             self.register_handlers()
             await self.video_handler.set_bot(self.bot)
 
